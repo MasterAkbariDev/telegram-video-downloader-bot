@@ -2,6 +2,21 @@
 
 All notable changes to this bot are documented here.
 
+## 1.7.1 — 2026-07-18
+
+### Added
+- TikTok support (`tiktok.com`, `vt.` / `vm.` short links) with `curl_cffi` TLS impersonation
+- Media captions restored: title, uploader, platform, size, and link to the original post
+- Captions on photos and the first album item
+
+### Fixed
+- TikTok “Access denied” / 403 (same-session download + Chrome impersonation)
+- Instagram multi-photo albums failing with “media not found” / `file://` upload bugs
+- Media always sent as a reply to the user’s message
+
+### Changed
+- Welcome / help / about list YouTube, Instagram, TikTok, and SoundCloud
+
 ## 1.6.9 — 2026-07-18
 
 ### Changed

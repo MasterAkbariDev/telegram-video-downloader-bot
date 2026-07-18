@@ -105,7 +105,7 @@ source .venv/bin/activate
 info "Installing Python dependencies…"
 pip install --upgrade pip -q
 pip install -r requirements.txt -q
-pip install -U "yt-dlp>=2024.12.23" -q
+pip install -U "yt-dlp[default,curl-cffi]>=2024.12.23" -q
 ok "Dependencies installed"
 
 # Fail loudly if the venv is unusable (common after a bad migrate)

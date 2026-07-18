@@ -130,16 +130,14 @@ async def send_media(
     progress_callback: UploadProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
 ) -> str | None:
-    """Send video/audio/photo/album. Returns Telegram file_id when available (for cache)."""
-    # Never attach captions — media only
-    caption = ""
-    parse = None
+    """Send video/audio/photo/album as a reply. Returns Telegram file_id when available."""
+    parse = ParseMode.HTML if caption else None
 
     if result.album and len(result.album) > 0:
-        return await _send_album(message, result)
+        return await _send_album(message, result, caption)
 
     if result.is_image and (result.file_path or result.direct_url or result.telegram_file_id):
-        return await _send_photo(message, result)
+        return await _send_photo(message, result, caption)
 
     as_audio = _send_as_audio(result)
     if as_audio != result.is_audio:
@@ -228,21 +226,25 @@ async def send_media(
     return _file_id_from_message(sent, result.is_audio)
 
 
-async def _send_photo(message: Message, result: MediaResult) -> str | None:
-    """Send image as a normal Telegram photo (no caption), as a reply."""
+async def _send_photo(message: Message, result: MediaResult, caption: str = "") -> str | None:
+    """Send image as a normal Telegram photo, always as a reply."""
+    kwargs: dict = {}
+    if caption:
+        kwargs["caption"] = caption
+        kwargs["parse_mode"] = ParseMode.HTML
     opened = None
     try:
         if result.telegram_file_id:
-            sent = await message.reply_photo(photo=result.telegram_file_id)
+            sent = await message.reply_photo(photo=result.telegram_file_id, **kwargs)
             return _file_id_from_message(sent, is_audio=False, is_photo=True)
         if result.file_path:
             opened = result.file_path.open("rb")
             media = InputFile(opened, filename=result.file_path.name)
             logger.info("Uploading photo (%s)", result.file_path.name)
-            sent = await message.reply_photo(photo=media)
+            sent = await message.reply_photo(photo=media, **kwargs)
             return _file_id_from_message(sent, is_audio=False, is_photo=True)
         if result.direct_url:
-            sent = await message.reply_photo(photo=result.direct_url)
+            sent = await message.reply_photo(photo=result.direct_url, **kwargs)
             return _file_id_from_message(sent, is_audio=False, is_photo=True)
         raise RuntimeError("No photo to send.")
     finally:
@@ -253,9 +255,8 @@ async def _send_photo(message: Message, result: MediaResult) -> str | None:
 async def _send_album(
     message: Message,
     result: MediaResult,
+    caption: str = "",
 ) -> str | None:
-    from telegram import InputMediaPhoto, InputMediaVideo
-
     album = result.album or []
     if len(album) == 1:
         only = album[0]
@@ -266,51 +267,83 @@ async def _send_album(
             file_path=only.path,
             direct_url=only.url if not only.path else None,
             is_image=only.kind == "image",
+            uploader=result.uploader,
         )
         if only.kind == "image":
-            return await _send_photo(message, single)
-        return await send_media(message, single, "")
+            return await _send_photo(message, single, caption)
+        return await send_media(message, single, caption)
 
-    logger.info("Uploading media group (%d items, no caption)", len(album))
-    handles = []
-    media_group = []
+    logger.info("Uploading media group (%d items, reply)", len(album))
+    media_group = _build_album_media(album, caption=caption)
+    if not media_group:
+        raise RuntimeError("No album items to send.")
+
     try:
-        for item in album:
-            if item.path and item.path.is_file():
-                fh = item.path.open("rb")
-                handles.append(fh)
-                upload = InputFile(fh, filename=item.path.name)
-                if item.kind == "video":
-                    media_group.append(
-                        InputMediaVideo(
-                            media=upload,
-                            supports_streaming=True,
-                        )
-                    )
-                else:
-                    media_group.append(InputMediaPhoto(media=upload))
-            elif item.url:
-                if item.kind == "video":
-                    media_group.append(
-                        InputMediaVideo(
-                            media=item.url,
-                            supports_streaming=True,
-                        )
-                    )
-                else:
-                    media_group.append(InputMediaPhoto(media=item.url))
-        if not media_group:
-            raise RuntimeError("No album items to send.")
         sent_list = await message.reply_media_group(media=media_group[:10])
-        if sent_list:
-            return _file_id_from_message(sent_list[0], is_audio=False, is_photo=True)
-        return None
-    finally:
-        for fh in handles:
+    except BadRequest as exc:
+        # Caption / parse quirks → retry bare album, then caption as reply
+        logger.warning("Album send failed (%s) — retrying without caption", exc)
+        bare = _build_album_media(album, caption="")
+        if not bare:
+            raise
+        sent_list = await message.reply_media_group(media=bare[:10])
+        if caption:
             try:
-                fh.close()
-            except Exception:
-                pass
+                await message.reply_text(
+                    caption,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            except TelegramError as cap_exc:
+                logger.warning("Could not send album caption separately: %s", cap_exc)
+
+    if sent_list:
+        return _file_id_from_message(sent_list[0], is_audio=False, is_photo=True)
+    return None
+
+
+def _build_album_media(album: list, *, caption: str = "") -> list:
+    """Build InputMedia list. Pass raw bytes so PTB assigns attach:// names."""
+    from telegram import InputMediaPhoto, InputMediaVideo
+
+    media_group = []
+    for index, item in enumerate(album):
+        cap_kwargs: dict = {}
+        if index == 0 and caption:
+            cap_kwargs["caption"] = caption
+            cap_kwargs["parse_mode"] = ParseMode.HTML
+
+        media = None
+        filename = None
+        if item.path and item.path.is_file() and item.path.stat().st_size > 0:
+            # Pass bytes (not Path, not pre-built InputFile without attach=True).
+            # Path → file:// (cloud API rejects). InputFile without attach → media not found.
+            media = item.path.read_bytes()
+            filename = item.path.name
+        elif item.url and str(item.url).startswith(("http://", "https://")):
+            media = item.url
+        if not media:
+            logger.warning("Skipping empty/invalid album item %s", index)
+            continue
+
+        if item.kind == "video":
+            media_group.append(
+                InputMediaVideo(
+                    media=media,
+                    filename=filename,
+                    supports_streaming=True,
+                    **cap_kwargs,
+                )
+            )
+        else:
+            media_group.append(
+                InputMediaPhoto(
+                    media=media,
+                    filename=filename,
+                    **cap_kwargs,
+                )
+            )
+    return media_group
 
 
 _VIDEO_SUFFIXES = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"}

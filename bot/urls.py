@@ -18,6 +18,7 @@ _SUPPORTED_HOSTS = (
     "soundcloud.com",
     "on.soundcloud.com",
     "m.soundcloud.com",
+    "tiktok.com",
 )
 
 # Plain http(s) URLs for supported hosts only
@@ -26,7 +27,8 @@ _PLAIN_URL_RE = re.compile(
     r"(?:"
     r"instagram\.com|instagr\.am|"
     r"youtube\.com|youtu\.be|m\.youtube\.com|music\.youtube\.com|"
-    r"soundcloud\.com|on\.soundcloud\.com|m\.soundcloud\.com"
+    r"soundcloud\.com|on\.soundcloud\.com|m\.soundcloud\.com|"
+    r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|m\.tiktok\.com"
     r")"
     r"[^\s<>\"']*",
     re.IGNORECASE,
@@ -38,7 +40,8 @@ _BARE_URL_RE = re.compile(
     r"(?:"
     r"instagram\.com|instagr\.am|"
     r"youtube\.com|youtu\.be|"
-    r"soundcloud\.com"
+    r"soundcloud\.com|"
+    r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com"
     r")"
     r"/[^\s<>\"']+",
     re.IGNORECASE,
@@ -46,7 +49,7 @@ _BARE_URL_RE = re.compile(
 
 
 def is_supported_url(url: str) -> bool:
-    """True if URL is Instagram, YouTube, or SoundCloud."""
+    """True if URL is Instagram, YouTube, SoundCloud, or TikTok."""
     if not url:
         return False
     try:

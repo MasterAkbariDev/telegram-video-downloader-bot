@@ -107,7 +107,7 @@ log_step progress "Updating Python dependencies"
 info "Updating Python dependencies…"
 pip install --upgrade pip -q
 pip install -r requirements.txt -q
-pip install -U "yt-dlp>=2024.12.23" -q
+pip install -U "yt-dlp[default,curl-cffi]>=2024.12.23" -q
 log_step ok "Dependencies updated"
 ok "Dependencies updated"
 

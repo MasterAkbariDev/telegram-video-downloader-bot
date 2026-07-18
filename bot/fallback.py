@@ -357,13 +357,40 @@ def _extract_instagram(url: str, client: httpx.Client) -> _Extracted | None:
 
 
 def _extract_tiktok(url: str, client: httpx.Client) -> _Extracted | None:
-    page = _fetch_page(url, client, mobile=True)
-    if not page:
+    # Prefer curl_cffi impersonation — plain httpx often gets 403 from TikTok.
+    page_text, final_url = _fetch_tiktok_page(url, client)
+    if not page_text:
         return None
-    media_url = _find_social_video_url(page.text)
+    media_url = _find_social_video_url(page_text)
     if not media_url:
         return None
-    return _Extracted(title=_find_title(page.text) or "TikTok video", media_url=media_url, referer=page.url)
+    return _Extracted(
+        title=_find_title(page_text) or "TikTok video",
+        media_url=media_url,
+        referer=final_url or url,
+    )
+
+
+def _fetch_tiktok_page(url: str, client: httpx.Client) -> tuple[str | None, str | None]:
+    try:
+        from curl_cffi import requests as curl_requests
+
+        resp = curl_requests.get(
+            url,
+            impersonate="chrome",
+            allow_redirects=True,
+            timeout=30,
+            proxy=YTDLP_PROXY,
+        )
+        if resp.status_code < 400 and resp.text:
+            return resp.text, str(resp.url)
+    except Exception as exc:
+        logger.debug("TikTok curl_cffi fetch failed: %s", exc)
+
+    page = _fetch_page(url, client, mobile=True)
+    if not page:
+        return None, None
+    return page.text, page.url
 
 
 def _extract_twitter(url: str, client: httpx.Client) -> _Extracted | None:
@@ -972,8 +999,11 @@ def _is_likely_thumbnail(url: str) -> bool:
 
 def _clean_url(raw: str) -> str:
     url = html.unescape(raw).strip()
-    url = url.replace("\\/", "/").replace("\\u0026", "&")
+    url = url.replace("\\/", "/").replace("\\u0026", "&").replace("\\u002f", "/")
+    url = url.replace("\\u002F", "/")
     url = unquote(url)
+    if url.startswith("//"):
+        url = "https:" + url
     return url
 
 

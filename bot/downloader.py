@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 import shutil
 import threading
 import time
@@ -52,9 +53,12 @@ _DIRECT_URL_SKIP = (
     "open.spotify.com",
     "music.apple.com",
     "deezer.com",
+    # TikTok CDN needs session cookies Telegram cannot send
+    "tiktok.com",
 )
 
 _INSTAGRAM_HOSTS = ("instagram.com", "instagr.am")
+_TIKTOK_HOSTS = ("tiktok.com",)
 
 _instagram_lock = threading.Lock()
 _instagram_ydl: yt_dlp.YoutubeDL | None = None
@@ -102,6 +106,7 @@ class MediaResult:
     telegram_file_id: str | None = None
     is_image: bool = False
     album: list[AlbumItem] | None = None
+    uploader: str | None = None
 
     @property
     def needs_cleanup(self) -> bool:
@@ -160,6 +165,15 @@ def resolve_media(
             if album:
                 return album
 
+    # TikTok CDN cookies are bound to the extract session — download in one pass
+    if _is_tiktok_url(url) and not force_audio:
+        return _resolve_tiktok(
+            url,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            display_title=display_title,
+        )
+
     audio_preferred = force_audio or _is_audio_url(url)
     job_id = uuid.uuid4().hex[:12]
     output_dir = DOWNLOAD_DIR / job_id
@@ -205,6 +219,7 @@ def resolve_media(
                     direct_url=direct_url,
                     used_direct=True,
                     cached_info=copy.deepcopy(info),
+                    uploader=_uploader_from_info(info),
                 )
 
         if progress_callback:
@@ -219,7 +234,8 @@ def resolve_media(
         if cancel_check:
             cancel_check()
 
-        fast = ytdlp_http_candidate(info)
+        # TikTok CDN requires extract-session cookies — use yt-dlp's downloader.
+        fast = None if _is_tiktok_url(url) else ytdlp_http_candidate(info)
         if fast:
             media_url, ext = fast
             dest = output_dir / f"download.{ext}"
@@ -264,6 +280,7 @@ def resolve_media(
             file_size=file_size,
             file_path=downloaded,
             used_direct=False,
+            uploader=_uploader_from_info(info),
         )
     except DownloadCancelledError:
         _cleanup_job_dir(output_dir)
@@ -334,6 +351,14 @@ def download_from_info(
     cancel_check: CancelCheck | None = None,
 ) -> MediaResult:
     """Download using a prior extract_info result — avoids slow re-lookup."""
+    # TikTok CDN URLs die without the original session cookies
+    if _is_tiktok_url(url):
+        return resolve_media(
+            url,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+        )
+
     audio_preferred = _is_audio_url(url)
     job_id = uuid.uuid4().hex[:12]
     output_dir = DOWNLOAD_DIR / job_id
@@ -357,7 +382,7 @@ def download_from_info(
     if cancel_check:
         cancel_check()
 
-    fast = ytdlp_http_candidate(cached_info)
+    fast = None if _is_tiktok_url(url) else ytdlp_http_candidate(cached_info)
     if fast:
         media_url, ext = fast
         dest = output_dir / f"download.{ext}"
@@ -402,6 +427,7 @@ def download_from_info(
         file_size=file_size,
         file_path=downloaded,
         used_direct=False,
+        uploader=_uploader_from_info(cached_info),
     )
 
 
@@ -411,6 +437,129 @@ def download_media(
 ) -> MediaResult:
     """Full resolve fallback when no cached info is available."""
     return resolve_media(url, progress_callback)
+
+
+def _resolve_tiktok(
+    url: str,
+    *,
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+    display_title: str | None = None,
+) -> MediaResult:
+    """
+    Extract and download TikTok in one yt-dlp session.
+
+    CDN URLs require cookies set during extraction; a separate process_info
+    on a new YoutubeDL instance gets HTTP 403.
+    """
+    job_id = uuid.uuid4().hex[:12]
+    output_dir = DOWNLOAD_DIR / job_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if cancel_check:
+            cancel_check()
+        if progress_callback:
+            name, emoji = detect_platform(url)
+            progress_callback(f"{emoji} <b>Downloading…</b>")
+
+        last_exc: BaseException | None = None
+        for height in _height_fallbacks():
+            if cancel_check:
+                cancel_check()
+            opts = _build_ydl_opts(
+                audio_preferred=False,
+                output_dir=output_dir,
+                progress_callback=progress_callback,
+                max_height=height,
+                url=url,
+                cancel_check=cancel_check,
+            )
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+            except DownloadError as exc:
+                last_exc = exc
+                if _is_format_unavailable(exc):
+                    logger.warning("TikTok format retry at %dp: %s", height, exc)
+                    continue
+                raise
+
+            if info is None:
+                raise RuntimeError("Could not extract media information from this link.")
+            info = _unwrap_search_or_single_entry(info, url)
+
+            downloaded = _find_downloaded_file(output_dir)
+            if not downloaded:
+                raise RuntimeError("Download finished but no file was found.")
+
+            title = display_title or info.get("title") or info.get("id") or "media"
+            is_audio = False
+            downloaded = _maybe_compress(
+                downloaded,
+                is_audio=is_audio,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                source_url=url,
+            )
+            file_size = downloaded.stat().st_size
+            if file_size > get_max_file_size():
+                downloaded.unlink(missing_ok=True)
+                logger.info(
+                    "TikTok file %s at %dp — trying lower quality",
+                    _format_size(file_size),
+                    height,
+                )
+                if progress_callback:
+                    progress_callback(
+                        f"⚠️ File is {_format_size(file_size)} "
+                        f"(max {_format_size(get_max_file_size())}). "
+                        f"<b>Trying lower quality…</b>"
+                    )
+                continue
+
+            return MediaResult(
+                title=title,
+                is_audio=is_audio,
+                file_size=file_size,
+                file_path=downloaded,
+                used_direct=False,
+                uploader=_uploader_from_info(info),
+            )
+
+        if last_exc:
+            raise last_exc
+        raise FileTooLargeError(None, tried_lower_quality=True)
+    except DownloadCancelledError:
+        _cleanup_job_dir(output_dir)
+        raise
+    except FileTooLargeError:
+        _cleanup_job_dir(output_dir)
+        raise
+    except Exception as exc:
+        _cleanup_job_dir(output_dir)
+        logger.warning("yt-dlp failed for %s: %s — trying fallback", url, exc)
+        job_id = uuid.uuid4().hex[:12]
+        fallback_dir = DOWNLOAD_DIR / job_id
+        fallback_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            if progress_callback:
+                progress_callback("🔄 <b>Trying backup downloader…</b>")
+            from bot.fallback import fallback_resolve
+
+            result = fallback_resolve(
+                url,
+                fallback_dir,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
+            if display_title:
+                result.title = display_title
+            return result
+        except Exception as fb_exc:
+            _cleanup_job_dir(fallback_dir)
+            logger.warning("Fallback failed for %s: %s", url, fb_exc)
+            raise exc
 
 
 def _extract_with_size_limit(
@@ -603,6 +752,36 @@ def _is_instagram_url(url: str) -> bool:
     return any(host in lower for host in _INSTAGRAM_HOSTS)
 
 
+def _is_tiktok_url(url: str) -> bool:
+    lower = url.lower()
+    return any(host in lower for host in _TIKTOK_HOSTS)
+
+
+def _uploader_from_info(info: dict | None) -> str | None:
+    if not info:
+        return None
+    for key in ("uploader", "creator", "channel", "artist", "uploader_id"):
+        val = info.get(key)
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text:
+            return text
+    return None
+
+
+def _maybe_impersonate(opts: dict, url: str | None) -> None:
+    """TikTok requires TLS fingerprint impersonation (curl_cffi)."""
+    if not url or not _is_tiktok_url(url):
+        return
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+
+        opts["impersonate"] = ImpersonateTarget.from_str("chrome")
+    except Exception as exc:
+        logger.warning("TikTok impersonate unavailable (install curl_cffi): %s", exc)
+
+
 def _instagram_throttle() -> None:
     global _last_instagram_request
     now = time.monotonic()
@@ -780,6 +959,7 @@ def _build_ydl_opts(
     }
 
     _apply_network_opts(opts)
+    _maybe_impersonate(opts, url)
 
     # Keep Instagram polite but don't add a full second between every request
     if url and _is_instagram_url(url):

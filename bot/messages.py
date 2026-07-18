@@ -29,7 +29,7 @@ START_TEXT = (
     "👋 <b>Welcome!</b>\n\n"
     "Send a video or music link and I’ll download it for you.\n\n"
     "<b>Supported</b>\n"
-    "▶️ YouTube · 📸 Instagram · 🎧 SoundCloud\n\n"
+    "▶️ YouTube · 📸 Instagram · 🎵 TikTok · 🎧 SoundCloud\n\n"
     "<b>Groups</b>\n"
     "Add me to a group and paste links — no commands needed.\n\n"
     "<b>Commands</b>\n"
@@ -58,13 +58,13 @@ HELP_TEXT = (
     "2. Remove and re-add the bot to the group\n"
     "3. Allow the bot to send messages\n\n"
     "<b>Supported</b>\n"
-    "YouTube, Instagram, and SoundCloud."
+    "YouTube, Instagram, TikTok, and SoundCloud."
 )
 
 ABOUT_TEXT = (
     "ℹ️ <b>About</b>\n\n"
     "Downloads videos, photos, and music from "
-    "YouTube, Instagram, and SoundCloud.\n\n"
+    "YouTube, Instagram, TikTok, and SoundCloud.\n\n"
     "{version_block}\n\n"
     "<b>Limits</b>\n"
     "• Files up to 50 MB by default\n"
@@ -163,6 +163,7 @@ def caption(
     is_image: bool = False,
     file_size: int | None = None,
     album_count: int | None = None,
+    uploader: str | None = None,
 ) -> str:
     name, emoji = detect_platform(url)
     if is_audio:
@@ -171,13 +172,42 @@ def caption(
         kind = "Photos" if album_count and album_count > 1 else "Photo"
     else:
         kind = "Video"
-    lines = [f"{emoji} <b>{esc(title)}</b>", f"{kind} from {name}"]
+
+    display_title = _caption_title(title, url, name)
+    lines = [f"{emoji} <b>{esc(display_title)}</b>"]
+    if uploader:
+        lines.append(f"👤 {esc(_format_uploader(uploader))}")
+    lines.append(f"{kind} from {name}")
     if album_count and album_count > 1:
         lines.append(f"🖼 {album_count} items")
     if file_size:
         lines.append(f"📦 {format_size(file_size)}")
     lines.append(f'<a href="{html.escape(url, quote=True)}">Open original</a>')
     return "\n".join(lines)
+
+
+def _caption_title(title: str, url: str, platform_name: str) -> str:
+    """Short clean title — avoid Instagram hashtag dumps in Telegram captions."""
+    text = (title or "").strip()
+    lower_url = url.lower()
+    if "instagram.com" in lower_url or "instagr.am" in lower_url:
+        if not text or text.count("#") >= 3 or len(text) > 80:
+            return "Instagram post"
+    if not text:
+        return platform_name
+    if len(text) > 100:
+        return text[:97].rstrip() + "…"
+    return text
+
+
+def _format_uploader(uploader: str) -> str:
+    name = uploader.strip()
+    if name.startswith("@"):
+        return name
+    # TikTok / IG style handles without spaces look better with @
+    if " " not in name and "/" not in name and len(name) <= 32:
+        return f"@{name}"
+    return name
 
 
 def download_progress(

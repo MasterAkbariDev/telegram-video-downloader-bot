@@ -119,7 +119,8 @@ def resolve_instagram_album(
                 accept = (
                     "video/mp4,video/*,*/*;q=0.8"
                     if slide.kind == "video"
-                    else "image/avif,image/webp,image/*,*/*;q=0.8"
+                    # Prefer JPEG/PNG — Telegram media groups reject some WebP/AVIF
+                    else "image/jpeg,image/jpg,image/png,image/*,*/*;q=0.8"
                 )
                 try:
                     download_http(
@@ -149,6 +150,9 @@ def resolve_instagram_album(
                     new_dest = dest.with_suffix(".mp4")
                     dest.rename(new_dest)
                     dest = new_dest
+                if kind == "image":
+                    dest = _ensure_telegram_photo(dest) or dest
+                    size = dest.stat().st_size
                 album.append(
                     AlbumItem(kind=kind, path=dest, url=slide.url, file_size=size)
                 )
@@ -183,6 +187,7 @@ def resolve_instagram_album(
         is_image=only_images,
         # Single image: send as one photo (not a 1-item album)
         album=album if len(album) > 1 else None,
+        uploader=_uploader_from_instagram_url(url),
     )
 
 
@@ -626,6 +631,59 @@ def _file_looks_like_image(path: Path) -> bool:
     return False
 
 
+def _ensure_telegram_photo(path: Path) -> Path | None:
+    """Convert WebP/AVIF to JPEG so Telegram media groups accept the file."""
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        return None
+
+    is_jpeg = head[:3] == b"\xff\xd8\xff"
+    is_png = head[:8] == b"\x89PNG\r\n\x1a\n"
+    if is_jpeg or is_png:
+        return path
+
+    is_webp = head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    is_avif = b"ftypavif" in head or b"ftypavis" in head
+    if not (is_webp or is_avif):
+        return path
+
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffmpeg"):
+        logger.warning("ffmpeg missing — cannot convert %s for Telegram", path.name)
+        return path
+
+    out = path.with_suffix(".jpg")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(path),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(out),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+        if out.is_file() and out.stat().st_size > 1000:
+            path.unlink(missing_ok=True)
+            logger.info("Converted %s → JPEG for Telegram album", path.name)
+            return out
+    except Exception as exc:
+        logger.warning("Could not convert %s to JPEG: %s", path.name, exc)
+        out.unlink(missing_ok=True)
+    return path
+
+
 def _file_looks_like_video(path: Path) -> bool:
     try:
         with path.open("rb") as fh:
@@ -671,6 +729,11 @@ def _page_title(text: str) -> str:
 def _skip_image(url: str) -> bool:
     lower = url.lower()
     return any(h in lower for h in _SKIP_IMAGE_HINTS)
+
+
+def _uploader_from_instagram_url(url: str) -> str | None:
+    match = re.search(r"instagram\.com/@([^/?#]+)", url, re.IGNORECASE)
+    return match.group(1) if match else None
 
 
 def _clean_url(raw: str) -> str:

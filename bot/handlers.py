@@ -322,7 +322,12 @@ async def _process_url(
                 telegram_file_id=cached.file_id,
                 is_image=cached.is_image,
             )
-            await send_media(message, result, "", cancel_check=cancel_check)
+            await send_media(
+                message,
+                result,
+                _media_caption(url, result),
+                cancel_check=cancel_check,
+            )
             await status_msg.delete()
             _record_success(update, url, result, user=user, message=message)
             return
@@ -367,8 +372,8 @@ async def _process_url(
         await _stop_progress_worker(progress_queue, worker_task)
         await _stop_heartbeat(heartbeat_task)
 
-        # Captions disabled — never attach Instagram titles/hashtags to media
-        media_caption = ""
+        # Attribution caption: title, uploader, original link
+        media_caption = _media_caption(url, result)
 
         if result.album:
             action = ChatAction.UPLOAD_PHOTO
@@ -381,7 +386,7 @@ async def _process_url(
                 total=total,
             )
             file_id = await send_media(
-                message, result, "", cancel_check=cancel_check
+                message, result, media_caption, cancel_check=cancel_check
             )
             _store_file_id(url, result, file_id)
             await status_msg.delete()
@@ -398,7 +403,7 @@ async def _process_url(
             )
             try:
                 file_id = await send_media(
-                    message, result, "", cancel_check=cancel_check
+                    message, result, media_caption, cancel_check=cancel_check
                 )
                 _store_file_id(url, result, file_id)
                 await status_msg.delete()
@@ -440,7 +445,7 @@ async def _process_url(
                     )
                 result = await loop.run_in_executor(None, dl_fn)
                 await _stop_progress_worker(progress_queue, worker_task)
-                media_caption = ""
+                media_caption = _media_caption(url, result)
         elif result.file_path or result.is_image:
             if result.is_image:
                 action = ChatAction.UPLOAD_PHOTO
@@ -546,6 +551,31 @@ def _cleanup_album(result) -> None:
         return
     # All slides share one job directory
     cleanup_file(paths[0])
+
+
+def _media_caption(url: str, result) -> str:
+    album_count = len(result.album) if result.album else None
+    uploader = getattr(result, "uploader", None) or _uploader_from_url(url)
+    return msg.caption(
+        result.title or "media",
+        url,
+        is_audio=bool(result.is_audio),
+        is_image=bool(result.is_image),
+        file_size=result.file_size,
+        album_count=album_count,
+        uploader=uploader,
+    )
+
+
+def _uploader_from_url(url: str) -> str | None:
+    import re
+
+    match = re.search(
+        r"(?:tiktok\.com|instagram\.com|youtube\.com)/@([^/?#]+)",
+        url,
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else None
 
 
 def _store_file_id(url: str, result, file_id: str | None) -> None:
