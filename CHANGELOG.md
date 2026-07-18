@@ -2,6 +2,17 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.1 — 2026-07-18
+
+### Changed
+- YouTube: prefer progressive MP4 (no ffmpeg merge) for faster Shorts / watch downloads
+- YouTube Music links (`music.youtube.com`) normalize to `www.youtube.com` before extract
+- Clearer error when a YouTube video is unavailable
+
+### Notes
+- YouTube CDN hotlink (like Instagram/X) is not possible: `googlevideo.com` URLs are
+  IP-bound, so Telegram’s servers get “Failed to get http url content”
+
 ## 1.8.0 — 2026-07-18
 
 ### Added

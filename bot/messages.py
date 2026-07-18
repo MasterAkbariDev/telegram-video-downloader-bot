@@ -301,6 +301,11 @@ def friendly_error(raw: str) -> str:
             "That video quality/format isn’t available from YouTube right now. "
             "Try again in a moment, or send a different link."
         )
+    if "video unavailable" in lower or "this video is not available" in lower:
+        return (
+            "This YouTube video isn’t available "
+            "(removed, private, or blocked in this region)."
+        )
     if "too large" in lower or "exceeds" in lower or "50 mb" in lower:
         if "try a shorter" in lower or "telegram" in lower or "2 gb" in lower:
             return raw

@@ -133,6 +133,8 @@ def resolve_media(
     display_title: str | None = None,
 ) -> MediaResult:
     """Single-pass: extract once, then direct-send or download (no double fetch)."""
+    url = _normalize_media_url(url)
+
     # Spotify is DRM in yt-dlp — resolve via SoundCloud / mirrors instead
     if not force_audio and not url.startswith(("ytsearch", "scsearch")):
         from bot.spotify import (
@@ -764,6 +766,30 @@ def _is_instagram_url(url: str) -> bool:
     return any(host in lower for host in _INSTAGRAM_HOSTS)
 
 
+def _is_youtube_url(url: str) -> bool:
+    lower = url.lower()
+    return any(
+        host in lower
+        for host in (
+            "youtube.com",
+            "youtu.be",
+            "music.youtube.com",
+            "m.youtube.com",
+        )
+    )
+
+
+def _normalize_media_url(url: str) -> str:
+    """Canonicalize known URL shapes (music.youtube → youtube, etc.)."""
+    lower = url.lower()
+    if "music.youtube.com" in lower:
+        # Same video id; www extractors are more reliable than music subdomain
+        return url.replace("music.youtube.com", "www.youtube.com").replace(
+            "Music.youtube.com", "www.youtube.com"
+        )
+    return url
+
+
 def _is_tiktok_url(url: str) -> bool:
     lower = url.lower()
     return any(host in lower for host in _TIKTOK_HOSTS)
@@ -1004,8 +1030,21 @@ def _video_format(height: int, url: str | None = None) -> str:
             "best"
         )
 
-    # YouTube/etc.: do NOT filter on filesize — unknown size excludes every format
-    # and triggers "Requested format is not available". Compress after download.
+    # YouTube: progressive MP4 first (no ffmpeg merge) — much faster for Shorts
+    # and keeps Telegram under the upload limit. Fall back to separate A/V streams.
+    # Do NOT filter on filesize — unknown size excludes every format.
+    if url and _is_youtube_url(url):
+        return (
+            f"best[ext=mp4][vcodec!=none][acodec!=none][height<={height}]/"
+            "best[ext=mp4][vcodec!=none][acodec!=none]/"
+            f"bv*[height<={height}]+ba/b[height<={height}]/"
+            f"bestvideo[height<={height}]+bestaudio/"
+            f"best[height<={height}]/"
+            "bv*+ba/b/"
+            "bestvideo+bestaudio/"
+            "best"
+        )
+
     return (
         f"bv*[height<={height}]+ba/b[height<={height}]/"
         f"bestvideo[height<={height}]+bestaudio/"
@@ -1019,6 +1058,12 @@ def _video_format(height: int, url: str | None = None) -> str:
 def _relaxed_video_format(height: int, url: str | None = None) -> str:
     if url and _is_instagram_url(url):
         return "best[ext=mp4][vcodec!=none][acodec!=none]/best"
+    if url and _is_youtube_url(url):
+        return (
+            f"best[ext=mp4][vcodec!=none][acodec!=none][height<={height}]/"
+            "best[ext=mp4][vcodec!=none][acodec!=none]/"
+            f"bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/b/best"
+        )
     return f"bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/b/best"
 
 
@@ -1037,6 +1082,14 @@ def _format_fallback_chain(
     if url and _is_instagram_url(url):
         return (
             "best[ext=mp4][vcodec!=none][acodec!=none]/best",
+            "best",
+        )
+    if url and _is_youtube_url(url):
+        return (
+            "best[ext=mp4][vcodec!=none][acodec!=none]/best",
+            _relaxed_video_format(height, url),
+            "bv*+ba/b",
+            "bestvideo+bestaudio/best",
             "best",
         )
     return (
