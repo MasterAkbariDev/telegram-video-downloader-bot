@@ -2,6 +2,13 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.3 — 2026-07-18
+
+### Added
+- Adult video hosts in the supported URL allowlist (Pornhub, XVideos, xHamster,
+  RedTube, XNXX, SpankBang, Eporner, YouPorn, Tube8, Beeg / beeg.site / beeg.team)
+- Welcome / help / about mention adult sites
+
 ## 1.8.2 — 2026-07-18
 
 ### Fixed

@@ -21,6 +21,19 @@ _SUPPORTED_HOSTS = (
     "tiktok.com",
     "x.com",
     "twitter.com",
+    # Adult (yt-dlp + fallback extractors)
+    "pornhub.com",
+    "xvideos.com",
+    "xhamster.com",
+    "redtube.com",
+    "xnxx.com",
+    "spankbang.com",
+    "eporner.com",
+    "youporn.com",
+    "tube8.com",
+    "beeg.com",
+    "beeg.site",
+    "beeg.team",
 )
 
 # Plain http(s) URLs for supported hosts only
@@ -31,7 +44,10 @@ _PLAIN_URL_RE = re.compile(
     r"youtube\.com|youtu\.be|m\.youtube\.com|music\.youtube\.com|"
     r"soundcloud\.com|on\.soundcloud\.com|m\.soundcloud\.com|"
     r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|m\.tiktok\.com|"
-    r"x\.com|twitter\.com"
+    r"x\.com|twitter\.com|"
+    r"pornhub\.com|xvideos\.com|xhamster\.com|redtube\.com|xnxx\.com|"
+    r"spankbang\.com|eporner\.com|youporn\.com|tube8\.com|"
+    r"beeg\.com|beeg\.site|beeg\.team"
     r")"
     r"[^\s<>\"']*",
     re.IGNORECASE,
@@ -45,7 +61,10 @@ _BARE_URL_RE = re.compile(
     r"youtube\.com|youtu\.be|"
     r"soundcloud\.com|"
     r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|"
-    r"x\.com|twitter\.com"
+    r"x\.com|twitter\.com|"
+    r"pornhub\.com|xvideos\.com|xhamster\.com|redtube\.com|xnxx\.com|"
+    r"spankbang\.com|eporner\.com|youporn\.com|tube8\.com|"
+    r"beeg\.com|beeg\.site|beeg\.team"
     r")"
     r"/[^\s<>\"']+",
     re.IGNORECASE,

@@ -55,6 +55,19 @@ _DIRECT_URL_SKIP = (
     "deezer.com",
     # TikTok CDN needs session cookies Telegram cannot send
     "tiktok.com",
+    # Adult CDNs usually block Telegram's fetchers
+    "pornhub.com",
+    "xvideos.com",
+    "xhamster.com",
+    "redtube.com",
+    "xnxx.com",
+    "spankbang.com",
+    "eporner.com",
+    "youporn.com",
+    "tube8.com",
+    "beeg.com",
+    "beeg.site",
+    "beeg.team",
 )
 
 _INSTAGRAM_HOSTS = ("instagram.com", "instagr.am")
