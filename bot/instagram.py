@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -65,6 +66,32 @@ def is_instagram_url(url: str) -> bool:
     return "instagram.com" in lower or "instagr.am" in lower
 
 
+def _download_ig_image(
+    url: str,
+    dest: Path,
+    *,
+    referer: str,
+    accept: str,
+    client: httpx.Client | None = None,
+) -> None:
+    """Single GET for Instagram photos — no HEAD probe."""
+    headers = {
+        "User-Agent": DESKTOP_UA,
+        "Accept": accept,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": referer,
+    }
+    if client is not None:
+        resp = client.get(url, headers=headers)
+        resp.raise_for_status()
+        dest.write_bytes(resp.content)
+        return
+    with make_client() as owned:
+        resp = owned.get(url, headers=headers)
+        resp.raise_for_status()
+        dest.write_bytes(resp.content)
+
+
 def resolve_instagram_album(
     url: str,
     *,
@@ -99,10 +126,46 @@ def resolve_instagram_album(
     if not images and len(videos) <= 1:
         return None
 
+    slides = slides[:10]  # Telegram album max 10
+    only_images = all(s.kind == "image" for s in slides)
+
+    # Prefer CDN URLs — Telegram can fetch Instagram CDN directly (much faster)
+    if only_images:
+        if progress_callback:
+            progress_callback("📤 <b>Sending Instagram photos…</b>")
+        if len(slides) == 1:
+            return MediaResult(
+                title="Instagram post",
+                is_audio=False,
+                file_size=None,
+                direct_url=slides[0].url,
+                used_direct=True,
+                is_image=True,
+                uploader=_uploader_from_instagram_url(url),
+            )
+        album = [
+            AlbumItem(kind="image", url=s.url, path=None, file_size=None)
+            for s in slides
+        ]
+        logger.info(
+            "Instagram album %s: %d CDN URL(s) (no VPS download)",
+            url[:80],
+            len(album),
+        )
+        return MediaResult(
+            title="Instagram post",
+            is_audio=False,
+            file_size=None,
+            used_direct=True,
+            is_image=True,
+            album=album,
+            uploader=_uploader_from_instagram_url(url),
+        )
+
+    # Mixed image+video carousels: download to disk (CDN video hotlink is flaky)
     if progress_callback:
         n = len(slides)
-        kind = "photos" if not videos else "media"
-        progress_callback(f"⬇️ <b>Downloading {n} Instagram {kind}…</b>")
+        progress_callback(f"⬇️ <b>Downloading {n} Instagram media…</b>")
 
     job_id = uuid.uuid4().hex[:12]
     output_dir = DOWNLOAD_DIR / job_id
@@ -110,41 +173,54 @@ def resolve_instagram_album(
 
     album: list[AlbumItem] = []
     try:
-        with make_client() as client:
-            for i, slide in enumerate(slides[:10], start=1):  # Telegram album max 10
+        workers = min(8, len(slides))
+        results: list[AlbumItem | None] = [None] * len(slides)
+
+        with make_client() as shared_client:
+
+            def _one(index: int, slide: IgSlide) -> AlbumItem | None:
                 if cancel_check:
                     cancel_check()
                 ext = "mp4" if slide.kind == "video" else "jpg"
-                dest = output_dir / f"slide_{i:02d}.{ext}"
+                dest = output_dir / f"slide_{index:02d}.{ext}"
                 accept = (
                     "video/mp4,video/*,*/*;q=0.8"
                     if slide.kind == "video"
-                    # Prefer JPEG/PNG — Telegram media groups reject some WebP/AVIF
                     else "image/jpeg,image/jpg,image/png,image/*,*/*;q=0.8"
                 )
                 try:
-                    download_http(
-                        client,
-                        slide.url,
-                        dest,
-                        referer=url,
-                        extra_headers={"Accept": accept},
-                        progress_callback=None,
-                        cancel_check=cancel_check,
-                    )
+                    if slide.kind == "image":
+                        _download_ig_image(
+                            slide.url,
+                            dest,
+                            referer=url,
+                            accept=accept,
+                            client=shared_client,
+                        )
+                    else:
+                        download_http(
+                            shared_client,
+                            slide.url,
+                            dest,
+                            referer=url,
+                            extra_headers={"Accept": accept},
+                            progress_callback=None,
+                            cancel_check=cancel_check,
+                            skip_probe=True,
+                        )
                 except Exception as exc:
-                    logger.warning("Instagram slide %s failed: %s", i, exc)
-                    continue
+                    logger.warning("Instagram slide %s failed: %s", index, exc)
+                    return None
+
                 size = dest.stat().st_size
                 if size < 2_000:
                     dest.unlink(missing_ok=True)
-                    continue
+                    return None
                 kind = slide.kind
-                # Poster JPEGs must never be sent as "video" or mistaken for photos of a reel
                 if kind == "video" and _file_looks_like_image(dest):
                     logger.warning("Dropping video slide that is actually an image poster")
                     dest.unlink(missing_ok=True)
-                    continue
+                    return None
                 if kind == "image" and _file_looks_like_video(dest):
                     kind = "video"
                     new_dest = dest.with_suffix(".mp4")
@@ -153,9 +229,24 @@ def resolve_instagram_album(
                 if kind == "image":
                     dest = _ensure_telegram_photo(dest) or dest
                     size = dest.stat().st_size
-                album.append(
-                    AlbumItem(kind=kind, path=dest, url=slide.url, file_size=size)
-                )
+                return AlbumItem(kind=kind, path=dest, url=slide.url, file_size=size)
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(_one, i, slide): i
+                    for i, slide in enumerate(slides, start=1)
+                }
+                for fut in as_completed(futures):
+                    idx = futures[fut]
+                    try:
+                        item = fut.result()
+                    except Exception as exc:
+                        logger.warning("Instagram slide worker failed: %s", exc)
+                        continue
+                    if item:
+                        results[idx - 1] = item
+
+        album = [item for item in results if item is not None]
     except Exception:
         _cleanup_dir(output_dir)
         raise
@@ -193,6 +284,7 @@ def resolve_instagram_album(
 
 def scrape_instagram_slides(url: str) -> tuple[str, list[IgSlide]]:
     shortcode = _shortcode(url)
+    # Prefer the original URL first (usually has the full carousel JSON)
     page_urls = [url]
     if shortcode:
         page_urls.extend(
@@ -201,10 +293,8 @@ def scrape_instagram_slides(url: str) -> tuple[str, list[IgSlide]]:
                 f"https://www.instagram.com/p/{shortcode}/embed/",
                 f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis",
                 f"https://www.instagram.com/reel/{shortcode}/embed/captioned/",
-                f"https://www.instagram.com/p/{shortcode}/",
             ]
         )
-
     cookies = _load_cookie_header()
     header_sets = [
         {
@@ -228,10 +318,10 @@ def scrape_instagram_slides(url: str) -> tuple[str, list[IgSlide]]:
     with httpx.Client(
         headers={"User-Agent": DESKTOP_UA},
         proxy=YTDLP_PROXY,
-        timeout=25.0,
+        timeout=15.0,
         follow_redirects=True,
     ) as client:
-        for page_url in page_urls:
+        for page_i, page_url in enumerate(page_urls):
             for headers in header_sets:
                 try:
                     resp = client.get(page_url, headers=headers)
@@ -259,6 +349,13 @@ def scrape_instagram_slides(url: str) -> tuple[str, list[IgSlide]]:
                         return title, best
                 except httpx.HTTPError as exc:
                     logger.debug("Instagram page fetch failed %s: %s", page_url, exc)
+
+            # Primary URL already returned slides — don't hammer every fallback
+            if page_i == 0 and len(best) >= 1:
+                # One image might be a stub og:image; try one embed, then stop
+                continue
+            if page_i >= 1 and best:
+                return title, best
 
     return title, best
 

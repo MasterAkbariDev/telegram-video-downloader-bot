@@ -273,7 +273,12 @@ async def _send_album(
             return await _send_photo(message, single, caption)
         return await send_media(message, single, caption)
 
-    logger.info("Uploading media group (%d items, reply)", len(album))
+    url_only = all(not item.path and item.url for item in album)
+    logger.info(
+        "Uploading media group (%d items, reply%s)",
+        len(album),
+        ", CDN URLs" if url_only else "",
+    )
     media_group = _build_album_media(album, caption=caption)
     if not media_group:
         raise RuntimeError("No album items to send.")
@@ -281,25 +286,98 @@ async def _send_album(
     try:
         sent_list = await message.reply_media_group(media=media_group[:10])
     except BadRequest as exc:
-        # Caption / parse quirks → retry bare album, then caption as reply
-        logger.warning("Album send failed (%s) — retrying without caption", exc)
-        bare = _build_album_media(album, caption="")
-        if not bare:
-            raise
-        sent_list = await message.reply_media_group(media=bare[:10])
-        if caption:
+        logger.warning("Album send failed (%s) — retrying", exc)
+        # CDN hotlink failed → download to disk then upload bytes
+        if url_only:
+            album = await asyncio.to_thread(_materialize_album_urls, album)
+            result.album = album
+            media_group = _build_album_media(album, caption=caption)
+            if not media_group:
+                raise
             try:
-                await message.reply_text(
-                    caption,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
-            except TelegramError as cap_exc:
-                logger.warning("Could not send album caption separately: %s", cap_exc)
+                sent_list = await message.reply_media_group(media=media_group[:10])
+            except BadRequest:
+                bare = _build_album_media(album, caption="")
+                sent_list = await message.reply_media_group(media=bare[:10])
+                if caption:
+                    try:
+                        await message.reply_text(
+                            caption,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                        )
+                    except TelegramError as cap_exc:
+                        logger.warning("Could not send album caption separately: %s", cap_exc)
+        else:
+            bare = _build_album_media(album, caption="")
+            if not bare:
+                raise
+            sent_list = await message.reply_media_group(media=bare[:10])
+            if caption:
+                try:
+                    await message.reply_text(
+                        caption,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                except TelegramError as cap_exc:
+                    logger.warning("Could not send album caption separately: %s", cap_exc)
 
     if sent_list:
         return _file_id_from_message(sent_list[0], is_audio=False, is_photo=True)
     return None
+
+
+def _materialize_album_urls(album: list) -> list:
+    """Download CDN URL album items to local files (fallback when Telegram rejects hotlinks)."""
+    import uuid
+
+    from bot.config import DOWNLOAD_DIR
+    from bot.downloader import AlbumItem
+    from bot.fast_download import make_client
+    from bot.instagram import _download_ig_image
+
+    job_dir = DOWNLOAD_DIR / uuid.uuid4().hex[:12]
+    job_dir.mkdir(parents=True, exist_ok=True)
+    out: list = []
+    with make_client() as client:
+        for i, item in enumerate(album, start=1):
+            if item.path and item.path.is_file():
+                out.append(item)
+                continue
+            if not item.url:
+                continue
+            ext = "mp4" if item.kind == "video" else "jpg"
+            dest = job_dir / f"slide_{i:02d}.{ext}"
+            try:
+                if item.kind == "image":
+                    _download_ig_image(
+                        item.url,
+                        dest,
+                        referer="https://www.instagram.com/",
+                        accept="image/jpeg,image/png,image/*,*/*;q=0.8",
+                        client=client,
+                    )
+                else:
+                    from bot.fast_download import download_http
+
+                    download_http(
+                        client,
+                        item.url,
+                        dest,
+                        referer="https://www.instagram.com/",
+                        skip_probe=True,
+                    )
+                size = dest.stat().st_size
+                if size < 2000:
+                    dest.unlink(missing_ok=True)
+                    continue
+                out.append(
+                    AlbumItem(kind=item.kind, path=dest, url=item.url, file_size=size)
+                )
+            except Exception as exc:
+                logger.warning("Album URL download failed: %s", exc)
+    return out
 
 
 def _build_album_media(album: list, *, caption: str = "") -> list:

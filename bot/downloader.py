@@ -249,6 +249,7 @@ def resolve_media(
                     extra_headers=ytdlp_http_headers(info),
                     progress_callback=progress_callback,
                     cancel_check=cancel_check,
+                    skip_probe=_is_instagram_url(url),
                 )
             downloaded = dest
         else:
@@ -395,6 +396,7 @@ def download_from_info(
                 extra_headers=ytdlp_http_headers(cached_info),
                 progress_callback=progress_callback,
                 cancel_check=cancel_check,
+                skip_probe=_is_instagram_url(url),
             )
         downloaded = dest
     else:
@@ -963,7 +965,8 @@ def _build_ydl_opts(
 
     # Keep Instagram polite but don't add a full second between every request
     if url and _is_instagram_url(url):
-        opts["sleep_interval_requests"] = 0.25
+        opts["sleep_interval_requests"] = 0
+        opts["socket_timeout"] = 15
 
     if audio_preferred:
         opts["postprocessors"] = [

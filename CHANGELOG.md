@@ -2,6 +2,13 @@
 
 All notable changes to this bot are documented here.
 
+## 1.7.2 — 2026-07-18
+
+### Changed
+- Instagram photo albums send via CDN URLs (Telegram fetches them) — much faster, no VPS download
+- Parallel slide downloads + skip HEAD probes when a disk fallback is needed
+- Faster Instagram scrape (fewer fallback pages) and lighter yt-dlp delays for reels
+
 ## 1.7.1 — 2026-07-18
 
 ### Added

@@ -31,7 +31,8 @@ COMPRESS_TARGET_MB = float(os.getenv("COMPRESS_TARGET_MB", "25"))
 COOKIES_FILE = os.getenv("COOKIES_FILE", "").strip() or None
 YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip() or None
 # Lower than 2s so Instagram feels snappy; raise if you hit 429s
-INSTAGRAM_MIN_INTERVAL = float(os.getenv("INSTAGRAM_MIN_INTERVAL", "0.25"))
+# Polite delay between Instagram yt-dlp extracts (seconds)
+INSTAGRAM_MIN_INTERVAL = float(os.getenv("INSTAGRAM_MIN_INTERVAL", "0.05"))
 
 STANDARD_UPLOAD_LIMIT = 50 * 1024 * 1024
 LARGE_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024
@@ -69,7 +70,7 @@ def reload_settings() -> None:
     MAX_VIDEO_HEIGHT = _MAX_HEIGHT.get(QUALITY, 480)
     COOKIES_FILE = os.getenv("COOKIES_FILE", "").strip() or None
     YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip() or None
-    INSTAGRAM_MIN_INTERVAL = float(os.getenv("INSTAGRAM_MIN_INTERVAL", "0.25"))
+    INSTAGRAM_MIN_INTERVAL = float(os.getenv("INSTAGRAM_MIN_INTERVAL", "0.05"))
     COMPRESS_TARGET_MB = float(os.getenv("COMPRESS_TARGET_MB", "25"))
 
 

@@ -56,8 +56,9 @@ def make_client() -> httpx.Client:
         headers={"User-Agent": DESKTOP_UA, "Accept-Language": "en-US,en;q=0.9"},
         cookies=load_cookies(),
         proxy=YTDLP_PROXY,
-        timeout=30.0,
+        timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=30.0),
         follow_redirects=True,
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
     )
 
 
@@ -113,17 +114,23 @@ def download_http(
     extra_headers: dict[str, str] | None = None,
     progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
+    skip_probe: bool = False,
 ) -> None:
     """Download a direct HTTP(S) file — parallel range requests when supported."""
     from bot.downloader import FileTooLargeError
 
     headers = build_headers(referer, extra_headers)
-    total = head_size(client, url, headers)
+    total = None if skip_probe else head_size(client, url, headers)
 
     if total and total > get_max_file_size():
         raise FileTooLargeError(total)
 
-    if total and total >= PARALLEL_MIN_BYTES and supports_range(client, url, headers):
+    if (
+        not skip_probe
+        and total
+        and total >= PARALLEL_MIN_BYTES
+        and supports_range(client, url, headers)
+    ):
         logger.info("Parallel download (%d workers, %s bytes)", PARALLEL_WORKERS, total)
         _download_parallel(url, dest, total, headers, progress_callback, cancel_check)
         return
