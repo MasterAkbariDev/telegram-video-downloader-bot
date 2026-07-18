@@ -21,7 +21,7 @@ from bot import stats
 from bot.jobs import DownloadCancelledError, register_job, request_cancel, unregister_job
 from bot.messages import detect_platform
 from bot.uploader import send_media
-from bot.urls import extract_urls_from_message
+from bot.urls import extract_any_urls_from_message, extract_urls_from_message
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +183,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     urls = extract_urls_from_message(message)
     if not urls:
+        # Private chats: explain unsupported links. Groups: stay quiet.
+        chat = update.effective_chat
+        if chat and chat.type == ChatType.PRIVATE:
+            any_urls = extract_any_urls_from_message(message)
+            if any_urls:
+                await message.reply_text(
+                    msg.unsupported_link_message(any_urls[0]),
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
         return
     inline_cache.mark_message_seen(update.effective_user.id if update.effective_user else None, urls)
 

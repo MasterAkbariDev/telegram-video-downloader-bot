@@ -2,6 +2,15 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.0 — 2026-07-18
+
+### Added
+- X (Twitter) photos, albums, and videos via syndication CDN (Telegram hotlink when possible)
+- Private DMs reply with an “unsupported link” message for unknown sites; groups stay silent
+
+### Changed
+- Welcome / help / about list X alongside YouTube, Instagram, TikTok, SoundCloud
+
 ## 1.7.2 — 2026-07-18
 
 ### Changed

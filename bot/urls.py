@@ -19,6 +19,8 @@ _SUPPORTED_HOSTS = (
     "on.soundcloud.com",
     "m.soundcloud.com",
     "tiktok.com",
+    "x.com",
+    "twitter.com",
 )
 
 # Plain http(s) URLs for supported hosts only
@@ -28,7 +30,8 @@ _PLAIN_URL_RE = re.compile(
     r"instagram\.com|instagr\.am|"
     r"youtube\.com|youtu\.be|m\.youtube\.com|music\.youtube\.com|"
     r"soundcloud\.com|on\.soundcloud\.com|m\.soundcloud\.com|"
-    r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|m\.tiktok\.com"
+    r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|m\.tiktok\.com|"
+    r"x\.com|twitter\.com"
     r")"
     r"[^\s<>\"']*",
     re.IGNORECASE,
@@ -41,15 +44,19 @@ _BARE_URL_RE = re.compile(
     r"instagram\.com|instagr\.am|"
     r"youtube\.com|youtu\.be|"
     r"soundcloud\.com|"
-    r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com"
+    r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|"
+    r"x\.com|twitter\.com"
     r")"
     r"/[^\s<>\"']+",
     re.IGNORECASE,
 )
 
+# Any http(s) URL — used to detect unsupported links in DMs
+_ANY_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
 
 def is_supported_url(url: str) -> bool:
-    """True if URL is Instagram, YouTube, SoundCloud, or TikTok."""
+    """True if URL is a supported media platform."""
     if not url:
         return False
     try:
@@ -192,3 +199,32 @@ def _unique(urls: list[str]) -> list[str]:
             seen.add(url)
             ordered.append(url)
     return ordered
+
+
+def extract_any_urls_from_message(message: Message) -> list[str]:
+    """Extract any plain http(s) URLs (including unsupported hosts). Ignores TEXT_LINK."""
+    found: list[str] = []
+    texts = []
+    if message.text:
+        texts.append((message.text, message.entities))
+    if message.caption:
+        texts.append((message.caption, message.caption_entities))
+
+    for text, entities in texts:
+        text_link_spans = _text_link_spans(entities)
+        if entities:
+            for entity in entities:
+                if entity.type != MessageEntity.URL:
+                    continue
+                if _overlaps_any(entity.offset, entity.length, text_link_spans):
+                    continue
+                fragment = _entity_text(text, entity)
+                if fragment:
+                    found.append(normalize_url(fragment))
+        for match in _ANY_URL_RE.finditer(text):
+            utf16_start = _utf16_len(text[: match.start()])
+            utf16_len = _utf16_len(match.group(0))
+            if _overlaps_any(utf16_start, utf16_len, text_link_spans):
+                continue
+            found.append(normalize_url(match.group(0)))
+    return _unique(found)

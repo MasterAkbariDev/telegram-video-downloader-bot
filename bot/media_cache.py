@@ -43,6 +43,9 @@ def cache_key(url: str) -> str:
     m = re.search(r"tiktok\.com/.*/video/(\d+)", lower)
     if m:
         return f"tt:{m.group(1)}"
+    m = re.search(r"(?:twitter\.com|x\.com)/(?:[^/]+/)?status(?:es)?/(\d+)", lower)
+    if m:
+        return f"x:{m.group(1)}"
     return "u:" + hashlib.sha256(url.strip().encode()).hexdigest()[:24]
 
 

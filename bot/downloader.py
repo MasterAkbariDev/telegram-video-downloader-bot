@@ -142,6 +142,7 @@ def resolve_media(
             resolve_youtube_playlist_audio,
         )
         from bot.instagram import is_instagram_url, resolve_instagram_album
+        from bot.twitter import is_x_url, resolve_x_post
 
         if is_spotify_url(url):
             return resolve_spotify_via_youtube(
@@ -164,6 +165,15 @@ def resolve_media(
             )
             if album:
                 return album
+        # X photos / videos via syndication CDN
+        if is_x_url(url):
+            post = resolve_x_post(
+                url,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
+            if post:
+                return post
 
     # TikTok CDN cookies are bound to the extract session — download in one pass
     if _is_tiktok_url(url) and not force_audio:

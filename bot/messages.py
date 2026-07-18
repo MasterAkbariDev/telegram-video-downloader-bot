@@ -29,7 +29,7 @@ START_TEXT = (
     "👋 <b>Welcome!</b>\n\n"
     "Send a video or music link and I’ll download it for you.\n\n"
     "<b>Supported</b>\n"
-    "▶️ YouTube · 📸 Instagram · 🎵 TikTok · 🎧 SoundCloud\n\n"
+    "▶️ YouTube · 📸 Instagram · 🎵 TikTok · 🐦 X · 🎧 SoundCloud\n\n"
     "<b>Groups</b>\n"
     "Add me to a group and paste links — no commands needed.\n\n"
     "<b>Commands</b>\n"
@@ -58,13 +58,13 @@ HELP_TEXT = (
     "2. Remove and re-add the bot to the group\n"
     "3. Allow the bot to send messages\n\n"
     "<b>Supported</b>\n"
-    "YouTube, Instagram, TikTok, and SoundCloud."
+    "YouTube, Instagram, TikTok, X, and SoundCloud."
 )
 
 ABOUT_TEXT = (
     "ℹ️ <b>About</b>\n\n"
     "Downloads videos, photos, and music from "
-    "YouTube, Instagram, TikTok, and SoundCloud.\n\n"
+    "YouTube, Instagram, TikTok, X, and SoundCloud.\n\n"
     "{version_block}\n\n"
     "<b>Limits</b>\n"
     "• Files up to 50 MB by default\n"
@@ -256,6 +256,18 @@ def cancelled_message(url: str, *, index: int | None = None, total: int | None =
         f"🛑 <b>Cancelled</b>\n\n"
         f"<code>{esc(truncate_url(url))}</code>"
     )
+
+
+def unsupported_link_message(url: str | None = None) -> str:
+    lines = [
+        "❌ <b>Unsupported link</b>",
+        "",
+        "I only download from:",
+        "▶️ YouTube · 📸 Instagram · 🎵 TikTok · 🐦 X · 🎧 SoundCloud",
+    ]
+    if url:
+        lines.extend(["", f"<code>{esc(truncate_url(url))}</code>"])
+    return "\n".join(lines)
 
 
 def friendly_error(raw: str) -> str:
