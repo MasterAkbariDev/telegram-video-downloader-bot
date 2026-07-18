@@ -2,6 +2,12 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.6 — 2026-07-18
+
+### Fixed
+- Pinterest video pins (new `videos/iht/expMp4/…` CDN paths) were sent as photos
+  because only the poster image matched; video URLs are detected again
+
 ## 1.8.5 — 2026-07-18
 
 ### Added

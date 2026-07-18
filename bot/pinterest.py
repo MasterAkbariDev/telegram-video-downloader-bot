@@ -36,8 +36,10 @@ _ORIGINAL_IMG_RE = re.compile(
     r"https://i\.pinimg\.com/originals/[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]+\.(?:jpg|jpeg|png|webp)",
     re.IGNORECASE,
 )
+# Paths vary: /videos/720p/…, /videos/mc/h264/…, /videos/iht/expMp4/…_720w.mp4
 _VIDEO_RE = re.compile(
-    r"https://v\d*\.pinimg\.com/videos/(?:mc/)?(?:\d+p|h264|expMp4)/[0-9a-f/]+[^\"'\s<>]+\.mp4",
+    r"https://v\d*\.pinimg\.com/videos/(?:[^\"'\s<>]+/)*?"
+    r"(?:\d+p|h264|expMp4)/[^\"'\s<>]+\.mp4",
     re.IGNORECASE,
 )
 
@@ -167,21 +169,31 @@ def _best_image(text: str) -> str | None:
 
 
 def _best_video(text: str) -> str | None:
-    urls = list(dict.fromkeys(_VIDEO_RE.findall(text)))
+    # JSON embeds often escape slashes as \/
+    normalized = text.replace("\\/", "/")
+    urls = list(dict.fromkeys(_VIDEO_RE.findall(normalized)))
     if not urls:
         return None
 
-    def score(u: str) -> tuple[int, int]:
+    def score(u: str) -> tuple[int, int, int]:
         lower = u.lower()
-        # Prefer standard progressive 720p over expMp4 variants
+        # Prefer standard progressive 720p over expMp4 / narrower widths
         tier = 0
         if "/720p/" in lower:
-            tier = 3
+            tier = 4
         elif "/h264/" in lower or re.search(r"/\d{3,4}p/", lower):
+            tier = 3
+        elif "expmp4" in lower:
             tier = 2
-        elif "expm4" in lower or "expmp4" in lower:
-            tier = 1
-        return (tier, len(u))
+            if "_720w" in lower or "_720p" in lower:
+                tier = 3
+            elif "_540w" in lower or "_480w" in lower:
+                tier = 1
+        width_hint = 0
+        m = re.search(r"_(\d{3,4})w", lower)
+        if m:
+            width_hint = int(m.group(1))
+        return (tier, width_hint, len(u))
 
     urls.sort(key=score, reverse=True)
     return urls[0]
