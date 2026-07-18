@@ -266,6 +266,42 @@ def error_message(url: str, reason: str, *, index: int | None = None, total: int
     )
 
 
+def quality_picker_caption(
+    url: str,
+    *,
+    title: str | None,
+    uploader: str | None,
+    duration: int | None,
+    index: int | None = None,
+    total: int | None = None,
+) -> str:
+    """Caption under the quality-picker thumbnail."""
+    name, emoji = detect_platform(url)
+    header = link_header(url, index, total)
+    display = _caption_title(title or "", url, name)
+    lines = [
+        header,
+        "",
+        f"{emoji} <b>{esc(display)}</b>",
+    ]
+    if uploader:
+        lines.append(f"👤 {esc(_format_uploader(uploader))}")
+    if duration and duration > 0:
+        lines.append(f"⏱ {_format_duration(int(duration))}")
+    lines.append("")
+    lines.append("Select quality:")
+    return "\n".join(lines)
+
+
+def _format_duration(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
 def cancelled_message(url: str, *, index: int | None = None, total: int | None = None) -> str:
     header = link_header(url, index, total)
     return (

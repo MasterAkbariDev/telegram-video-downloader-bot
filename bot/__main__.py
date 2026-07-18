@@ -28,6 +28,7 @@ from bot.handlers import (
     handle_message,
     help_command,
     inline_query_handler,
+    quality_callback,
     start_command,
 )
 from bot import stats
@@ -108,6 +109,14 @@ def main() -> None:
         CallbackQueryHandler(
             admin_callback,
             pattern=r"^admin:",
+            block=True,
+        ),
+        group=0,
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            quality_callback,
+            pattern=r"^q:",
             block=True,
         ),
         group=0,

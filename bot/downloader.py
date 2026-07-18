@@ -144,14 +144,24 @@ def resolve_media(
     *,
     force_audio: bool = False,
     display_title: str | None = None,
+    max_height: int | None = None,
 ) -> MediaResult:
-    """Single-pass: extract once, then direct-send or download (no double fetch)."""
+    """Single-pass: extract once, then direct-send or download (no double fetch).
+
+    When max_height is set (quality picker), skip CDN platform shortcuts and
+    download via yt-dlp at that height.
+    """
     original_url = url
     is_yt_music = "music.youtube.com" in url.lower()
     url = _normalize_media_url(url)
+    quality_download = max_height is not None
 
     # Spotify is DRM in yt-dlp — resolve via SoundCloud / mirrors instead
-    if not force_audio and not url.startswith(("ytsearch", "scsearch")):
+    if (
+        not force_audio
+        and not quality_download
+        and not url.startswith(("ytsearch", "scsearch"))
+    ):
         from bot.spotify import (
             is_spotify_url,
             is_youtube_playlist_url,
@@ -232,13 +242,15 @@ def resolve_media(
             output_dir=output_dir,
             progress_callback=progress_callback,
             cancel_check=cancel_check,
+            preferred_max_height=max_height,
         )
 
         title = display_title or info.get("title") or info.get("id") or "media"
         is_audio = _result_is_audio(info, url=url, audio_preferred=audio_preferred)
 
         # Instagram: always try a progressive CDN URL so Telegram fetches it (no VPS upload)
-        if not force_audio:
+        # Skip CDN short-circuit when user picked an explicit height.
+        if not force_audio and not quality_download:
             direct_url = _direct_url_from_info(info, prefer_small=_is_instagram_url(url))
             if direct_url and not _should_skip_direct_url(url):
                 est = _estimate_size(info)
@@ -414,6 +426,8 @@ def download_from_info(
     url: str,
     progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
+    *,
+    max_height: int | None = None,
 ) -> MediaResult:
     """Download using a prior extract_info result — avoids slow re-lookup."""
     # TikTok CDN URLs die without the original session cookies
@@ -422,6 +436,16 @@ def download_from_info(
             url,
             progress_callback=progress_callback,
             cancel_check=cancel_check,
+        )
+
+    # Quality pick: re-resolve at the chosen height (format string must match)
+    if max_height is not None:
+        return resolve_media(
+            url,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            max_height=max_height,
+            display_title=cached_info.get("title"),
         )
 
     audio_preferred = _is_audio_url(url)
@@ -635,10 +659,19 @@ def _extract_with_size_limit(
     output_dir: Path,
     progress_callback: ProgressCallback | None,
     cancel_check: CancelCheck | None = None,
+    preferred_max_height: int | None = None,
 ) -> tuple[dict, dict]:
     """Extract metadata, auto-lowering quality if the file exceeds 50 MB."""
     tried_lower = False
-    heights = _height_fallbacks() if not audio_preferred else [MAX_VIDEO_HEIGHT]
+    if audio_preferred:
+        heights = [MAX_VIDEO_HEIGHT]
+    elif preferred_max_height is not None:
+        # Quality picker: start at chosen height, then step down if too large
+        heights = [preferred_max_height] + [
+            h for h in (720, 480, 360, 240, 144) if h < preferred_max_height
+        ]
+    else:
+        heights = _height_fallbacks()
 
     last_info: dict | None = None
     last_opts: dict | None = None
@@ -776,6 +809,88 @@ def _unwrap_search_or_single_entry(info: dict, url: str) -> dict:
     raise RuntimeError(
         "Playlists are not supported via this link type — send a single track/video link."
     )
+
+
+def extract_media_info(
+    url: str,
+    *,
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> dict:
+    """Extract metadata only (no download) for quality listing."""
+    url = _normalize_media_url(url)
+    job_id = uuid.uuid4().hex[:12]
+    output_dir = DOWNLOAD_DIR / job_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        opts = _build_ydl_opts(
+            audio_preferred=False,
+            output_dir=output_dir,
+            progress_callback=progress_callback,
+            max_height=1080,
+            url=url,
+            cancel_check=cancel_check,
+        )
+        # List formats — don't constrain so available_video_heights sees everything
+        opts = {**opts, "format": "best/bestvideo+bestaudio/best"}
+        info = _extract_info(
+            url,
+            opts,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+        )
+        if info is None:
+            raise RuntimeError("Could not extract media information from this link.")
+        return _unwrap_search_or_single_entry(info, url)
+    finally:
+        _cleanup_job_dir(output_dir)
+
+
+def available_video_heights(info: dict) -> list[int]:
+    """Ladder heights (360/480/720/1080) present in yt-dlp formats."""
+    from bot.quality import QUALITY_LADDER
+
+    found: set[int] = set()
+    for fmt in info.get("formats") or []:
+        if not isinstance(fmt, dict):
+            continue
+        if _codec_is_none(fmt.get("vcodec")):
+            continue
+        try:
+            height = int(fmt.get("height") or 0)
+        except (TypeError, ValueError):
+            continue
+        if height <= 0:
+            continue
+        for ladder in reversed(QUALITY_LADDER):
+            if height >= ladder:
+                found.add(ladder)
+                break
+    return sorted(found)
+
+
+def thumbnail_url_from_info(info: dict) -> str | None:
+    thumb = info.get("thumbnail")
+    if isinstance(thumb, str) and thumb.startswith("http"):
+        return thumb
+    thumbs = info.get("thumbnails") or []
+    best_url = None
+    best_pref = -10_000
+    for item in thumbs:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url")
+        if not isinstance(url, str) or not url.startswith("http"):
+            continue
+        pref = item.get("preference")
+        try:
+            score = int(pref) if pref is not None else int(item.get("height") or 0)
+        except (TypeError, ValueError):
+            score = 0
+        if score >= best_pref:
+            best_pref = score
+            best_url = url
+    return best_url
 
 
 def _height_from_info(info: dict) -> int:

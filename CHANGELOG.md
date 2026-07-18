@@ -2,6 +2,13 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.5 — 2026-07-18
+
+### Added
+- Quality picker for long YouTube, X, and adult videos: thumbnail + title +
+  height buttons (360/480/720/1080) + Cancel before download
+- Skips picker for Shorts, Instagram, Pinterest, TikTok, audio, and single-height videos
+
 ## 1.8.4 — 2026-07-18
 
 ### Added

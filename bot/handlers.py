@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 
-from telegram import InlineQueryResultArticle, InputTextMessageContent, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent, Update
 from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
@@ -16,10 +16,22 @@ from bot.admin import admin_keyboard_for_start, admin_settings_input
 from bot.config import is_admin
 from bot import inline_cache
 from bot import media_cache
-from bot.downloader import FileTooLargeError, MediaResult, cleanup_file, download_from_info, extract_urls, resolve_media
+from bot import quality_pending
+from bot.downloader import (
+    FileTooLargeError,
+    MediaResult,
+    available_video_heights,
+    cleanup_file,
+    download_from_info,
+    extract_media_info,
+    extract_urls,
+    resolve_media,
+    thumbnail_url_from_info,
+)
 from bot import stats
 from bot.jobs import DownloadCancelledError, register_job, request_cancel, unregister_job
 from bot.messages import detect_platform
+from bot.quality import needs_quality_picker
 from bot.uploader import send_media
 from bot.urls import extract_any_urls_from_message, extract_urls_from_message
 
@@ -61,7 +73,7 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Cancel admin credential input or an active download/upload."""
+    """Cancel admin credential input, a quality picker, or an active download/upload."""
     from bot.admin import AWAIT_API_HASH, AWAIT_API_ID, _require_admin_dm, cancel_admin_input
 
     if (
@@ -76,8 +88,13 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not user:
         return
 
+    cleared = quality_pending.clear_user(user.id)
     if request_cancel(user.id):
         await update.message.reply_text("🛑 Cancelling current download/upload…")
+        return
+
+    if cleared:
+        await update.message.reply_text("🛑 Quality selection cancelled.")
         return
 
     await update.message.reply_text("Nothing in progress to cancel.")
@@ -277,6 +294,221 @@ async def _inline_target_chat_fallback(
         logger.warning("Could not send inline fallback DM to user %s: %s", user_id, exc)
 
 
+def _quality_keyboard(token: str, heights: list[int]) -> InlineKeyboardMarkup:
+    row = [
+        InlineKeyboardButton(f"{h}p", callback_data=f"q:{token}:{h}")
+        for h in heights
+    ]
+    rows = [row] if len(row) <= 8 else [row[:4], row[4:]]
+    rows.append([InlineKeyboardButton("✕ Cancel", callback_data=f"q:{token}:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _maybe_show_quality_picker(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    url: str,
+    *,
+    message,
+    status_msg,
+    user,
+    index: int,
+    total: int,
+    cancel_check,
+) -> bool:
+    """Extract formats; if 2+ ladder heights, show picker and return True."""
+    loop = asyncio.get_running_loop()
+    try:
+        info = await loop.run_in_executor(
+            None,
+            lambda: extract_media_info(url, cancel_check=cancel_check),
+        )
+    except DownloadCancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("Quality extract failed for %s: %s — auto-download", url[:80], exc)
+        return False
+
+    heights = available_video_heights(info)
+    if len(heights) < 2:
+        return False
+
+    thumb = thumbnail_url_from_info(info)
+    title = info.get("title")
+    uploader = (
+        info.get("uploader")
+        or info.get("channel")
+        or info.get("creator")
+        or info.get("uploader_id")
+    )
+    duration = info.get("duration")
+    try:
+        duration_i = int(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration_i = None
+
+    pending = quality_pending.create(
+        user_id=user.id,
+        url=url,
+        chat_id=message.chat_id,
+        reply_to_message_id=message.message_id,
+        index=index,
+        total=total,
+        heights=heights,
+        title=str(title) if title else None,
+        uploader=str(uploader) if uploader else None,
+        duration=duration_i,
+        thumbnail=thumb,
+        info=info,
+    )
+    keyboard = _quality_keyboard(pending.token, heights)
+    caption = msg.quality_picker_caption(
+        url,
+        title=pending.title,
+        uploader=pending.uploader,
+        duration=pending.duration,
+        index=index,
+        total=total,
+    )
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    picker_msg = None
+    if thumb:
+        try:
+            picker_msg = await message.reply_photo(
+                photo=thumb,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+        except (BadRequest, TelegramError) as exc:
+            logger.warning("Quality thumbnail failed for %s: %s", url[:80], exc)
+
+    if picker_msg is None:
+        picker_msg = await message.reply_text(
+            caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+
+    quality_pending.set_picker_message_id(pending.token, picker_msg.message_id)
+    logger.info(
+        "Quality picker for %s heights=%s token=%s",
+        url[:80],
+        heights,
+        pending.token,
+    )
+    return True
+
+
+async def quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle q:{token}:{height}|cancel from the quality picker."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    user = update.effective_user
+    data = query.data or ""
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "q":
+        return
+    token, action = parts[1], parts[2]
+
+    pending = quality_pending.get(token)
+    if not user or not pending or pending.user_id != user.id:
+        quality_pending.pop(token)
+        try:
+            await query.answer("This selection expired.", show_alert=True)
+        except Exception:
+            pass
+        try:
+            if query.message:
+                await query.message.delete()
+        except Exception:
+            pass
+        return
+
+    if action == "cancel":
+        quality_pending.pop(token)
+        try:
+            if query.message:
+                await query.message.delete()
+        except Exception:
+            pass
+        return
+
+    try:
+        height = int(action)
+    except ValueError:
+        return
+
+    if height not in pending.heights:
+        await query.answer("That quality is no longer available.", show_alert=True)
+        return
+
+    quality_pending.pop(token)
+    url = pending.url
+    index = pending.index
+    total = pending.total
+
+    status_text = msg.status_message(
+        url,
+        f"⬇️ <b>Downloading {height}p…</b>",
+        index=index,
+        total=total,
+    )
+    status_msg = query.message
+    try:
+        if status_msg and status_msg.photo:
+            await status_msg.edit_caption(
+                caption=status_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=None,
+            )
+        elif status_msg:
+            await status_msg.edit_text(
+                status_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=None,
+                disable_web_page_preview=True,
+            )
+    except Exception:
+        try:
+            status_msg = await context.bot.send_message(
+                chat_id=pending.chat_id,
+                text=status_text,
+                parse_mode=ParseMode.HTML,
+                reply_to_message_id=pending.reply_to_message_id,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            status_msg = None
+
+    message = None
+    if query.message and query.message.reply_to_message:
+        message = query.message.reply_to_message
+    if message is None:
+        message = update.effective_message
+
+    await _process_url(
+        update,
+        context,
+        url,
+        index=index,
+        total=total,
+        message=message,
+        status_msg=status_msg,
+        user=user,
+        max_height=height,
+    )
+
+
 async def _process_url(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -287,6 +519,7 @@ async def _process_url(
     message=None,
     status_msg=None,
     user=None,
+    max_height: int | None = None,
 ) -> None:
     message = message or update.effective_message
     user = user or update.effective_user
@@ -304,10 +537,12 @@ async def _process_url(
         )
     else:
         try:
-            await status_msg.edit_text(
-                msg.status_message(url, f"{emoji} <b>Extracting…</b>", index=index, total=total),
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
+            await _edit_status(
+                status_msg,
+                url,
+                f"{emoji} <b>Extracting…</b>",
+                index=index,
+                total=total,
             )
         except Exception:
             pass
@@ -319,7 +554,8 @@ async def _process_url(
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     # Instant path: re-send previously uploaded Telegram file_id
-    cached = media_cache.get_cached(url)
+    # Skip when user explicitly chose a quality.
+    cached = None if max_height is not None else media_cache.get_cached(url)
     if cached:
         # Old bug stored Instagram reels as audio file_ids — those can't be
         # re-sent as video. Drop and re-download once.
@@ -360,6 +596,23 @@ async def _process_url(
             logger.warning("Cached file_id failed for %s: %s — re-downloading", url, exc)
             media_cache.delete_cached(url)
 
+    # Quality picker for long YouTube / X / adult videos (2+ heights)
+    if max_height is None and needs_quality_picker(url):
+        shown = await _maybe_show_quality_picker(
+            update,
+            context,
+            url,
+            message=message,
+            status_msg=status_msg,
+            user=user,
+            index=index,
+            total=total,
+            cancel_check=cancel_check,
+        )
+        if shown:
+            unregister_job(user.id)
+            return
+
     loop = asyncio.get_running_loop()
     progress_queue: asyncio.Queue[str | None] = asyncio.Queue()
     progress_seen = asyncio.Event()
@@ -384,12 +637,14 @@ async def _process_url(
 
     result = None
     try:
+        chosen_height = max_height
         result = await loop.run_in_executor(
             None,
-            lambda: resolve_media(
+            lambda h=chosen_height: resolve_media(
                 url,
                 progress_callback=on_progress,
                 cancel_check=cancel_check,
+                max_height=h,
             ),
         )
 
@@ -730,14 +985,13 @@ async def _progress_worker(
         text = await queue.get()
         if text is None:
             break
-        try:
-            await status_msg.edit_text(
-                msg.status_message(url, text, index=index, total=total),
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-        except Exception:
-            pass
+        await _edit_status(
+            status_msg,
+            url,
+            text,
+            index=index,
+            total=total,
+        )
 
 
 async def _stop_progress_worker(queue: asyncio.Queue[str | None], task: asyncio.Task) -> None:
@@ -763,19 +1017,26 @@ async def _connecting_heartbeat(
         while not progress_seen.is_set():
             elapsed = int(time.monotonic() - start)
             try:
-                await status_msg.edit_text(
-                    msg.connecting_status(
-                        url,
-                        name=name,
-                        emoji=emoji,
-                        elapsed_sec=elapsed,
-                        phase=phase,
-                        index=index,
-                        total=total,
-                    ),
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
+                text = msg.connecting_status(
+                    url,
+                    name=name,
+                    emoji=emoji,
+                    elapsed_sec=elapsed,
+                    phase=phase,
+                    index=index,
+                    total=total,
                 )
+                if getattr(status_msg, "photo", None):
+                    await status_msg.edit_caption(
+                        caption=text,
+                        parse_mode=ParseMode.HTML,
+                    )
+                else:
+                    await status_msg.edit_text(
+                        text,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
             except Exception:
                 pass
             phase += 1
@@ -806,11 +1067,20 @@ async def _edit_status(
     total: int,
     title: str | None = None,
 ) -> None:
+    if status_msg is None:
+        return
+    text = msg.status_message(url, step, index=index, total=total, title=title)
     try:
-        await status_msg.edit_text(
-            msg.status_message(url, step, index=index, total=total, title=title),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+        if getattr(status_msg, "photo", None):
+            await status_msg.edit_caption(
+                caption=text,
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await status_msg.edit_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
     except Exception:
         pass
