@@ -99,6 +99,156 @@ def youtube_search_query(meta: dict[str, str]) -> str:
     return title
 
 
+def fetch_youtube_oembed_meta(url: str) -> dict[str, str]:
+    """Title/artist via YouTube oEmbed (works even when the video is unplayable)."""
+    video_id = _youtube_video_id(url)
+    watch = (
+        f"https://www.youtube.com/watch?v={video_id}"
+        if video_id
+        else url.replace("music.youtube.com", "www.youtube.com")
+    )
+    oembed = f"https://www.youtube.com/oembed?url={quote(watch, safe='')}&format=json"
+    title = ""
+    artist = ""
+    try:
+        with httpx.Client(
+            headers={"User-Agent": _DESKTOP_UA},
+            proxy=YTDLP_PROXY,
+            timeout=20.0,
+            follow_redirects=True,
+        ) as client:
+            resp = client.get(oembed)
+            if resp.status_code < 400:
+                data = resp.json()
+                title = (data.get("title") or "").strip()
+                artist = (data.get("author_name") or "").strip()
+                # Auto-generated Topic channels: "Artist - Topic"
+                if artist.lower().endswith(" - topic"):
+                    artist = artist[: -len(" - topic")].strip()
+                elif artist.lower().endswith("-topic"):
+                    artist = artist[: -len("-topic")].strip()
+    except Exception as exc:
+        logger.warning("YouTube oEmbed failed for %s: %s", url, exc)
+
+    return {"title": title or "YouTube track", "artist": artist}
+
+
+def _youtube_video_id(url: str) -> str | None:
+    match = re.search(
+        r"(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/|"
+        r"music\.youtube\.com/watch\?v=)([a-zA-Z0-9_-]{6,})",
+        url,
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
+def is_youtube_unavailable_error(exc: BaseException | str) -> bool:
+    text = str(exc).lower()
+    return (
+        "video unavailable" in text
+        or "this video is not available" in text
+        or "private video" in text
+        or "has been removed" in text
+    )
+
+
+def resolve_unavailable_youtube(
+    url: str,
+    *,
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+    prefer_audio: bool = True,
+):
+    """When a YouTube / Music id is unplayable, find the same track elsewhere.
+
+    Topic / Music catalog ids often return UNPLAYABLE while oEmbed still has
+    title + artist — search SoundCloud, Piped/Invidious, then YouTube.
+    """
+    from bot.downloader import resolve_media
+
+    if progress_callback:
+        progress_callback("🎧 <b>Track unavailable — searching for a match…</b>")
+    if cancel_check:
+        cancel_check()
+
+    meta = fetch_youtube_oembed_meta(url)
+    query = youtube_search_query(meta)
+    display = (
+        f"{meta['artist']} - {meta['title']}".strip(" -")
+        if meta.get("artist")
+        else meta["title"]
+    )
+    label = f"{meta['artist']} — {meta['title']}" if meta.get("artist") else meta["title"]
+    original_id = _youtube_video_id(url)
+    errors: list[str] = []
+
+    # 1) YouTube search — Topic catalog ids often have a matching channel upload
+    if cancel_check:
+        cancel_check()
+    if progress_callback:
+        progress_callback(f"🎧 <b>Searching YouTube…</b>\n<i>{_esc(label)}</i>")
+    try:
+        logger.info("Unavailable YouTube %s → ytsearch %r", url, query)
+        return resolve_media(
+            f"ytsearch5:{query}",
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            force_audio=prefer_audio,
+            display_title=display,
+        )
+    except Exception as exc:
+        errors.append(f"youtube: {exc}")
+        logger.warning("YouTube search path failed: %s", exc)
+
+    # 2) Piped / Invidious (search for an alternate upload — skip the dead id)
+    if cancel_check:
+        cancel_check()
+    if progress_callback:
+        progress_callback(f"🎧 <b>Trying YouTube mirrors…</b>\n<i>{_esc(label)}</i>")
+    try:
+        result = _resolve_via_mirrors(
+            query,
+            display_title=display,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            prefer_title=meta.get("title") or "",
+            prefer_artist=meta.get("artist") or "",
+            skip_video_ids={original_id} if original_id else None,
+        )
+        if result:
+            return result
+        errors.append("mirrors: no usable stream")
+    except Exception as exc:
+        errors.append(f"mirrors: {exc}")
+        logger.warning("YouTube mirror path failed: %s", exc)
+
+    # 3) SoundCloud
+    if progress_callback:
+        progress_callback(f"🎧 <b>Finding on SoundCloud…</b>\n<i>{_esc(label)}</i>")
+    try:
+        logger.info("Unavailable YouTube %s → SoundCloud %r", url, query)
+        result = _resolve_via_soundcloud(
+            query,
+            meta=meta,
+            display_title=display,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+        )
+        if result:
+            return result
+        errors.append("soundcloud: no good match")
+    except Exception as exc:
+        errors.append(f"soundcloud: {exc}")
+        logger.warning("YouTube SoundCloud path failed: %s", exc)
+
+    raise RuntimeError(
+        "This YouTube track isn’t available and no matching upload was found. "
+        "Try a Spotify or SoundCloud link instead. "
+        f"(details: {'; '.join(errors)[:400]})"
+    )
+
+
 def resolve_spotify_via_youtube(
     url: str,
     *,
@@ -404,11 +554,13 @@ def _resolve_via_mirrors(
     cancel_check: CancelCheck | None,
     prefer_title: str = "",
     prefer_artist: str = "",
+    skip_video_ids: set[str] | None = None,
 ):
     video_id, video_title = _mirror_search(
         query,
         prefer_title=prefer_title,
         prefer_artist=prefer_artist,
+        skip_video_ids=skip_video_ids,
     )
     if not video_id:
         return None
@@ -567,11 +719,13 @@ def _mirror_search(
     *,
     prefer_title: str = "",
     prefer_artist: str = "",
+    skip_video_ids: set[str] | None = None,
 ) -> tuple[str | None, str]:
     vid, title = _piped_search(
         query,
         prefer_title=prefer_title,
         prefer_artist=prefer_artist,
+        skip_video_ids=skip_video_ids,
     )
     if vid:
         return vid, title
@@ -579,6 +733,7 @@ def _mirror_search(
         query,
         prefer_title=prefer_title,
         prefer_artist=prefer_artist,
+        skip_video_ids=skip_video_ids,
     )
 
 
@@ -617,8 +772,10 @@ def _rank_video_candidates(
     *,
     prefer_title: str,
     prefer_artist: str,
+    skip_video_ids: set[str] | None = None,
 ) -> tuple[str | None, str]:
     """Pick best video id/title from Piped/Invidious search rows."""
+    skip = skip_video_ids or set()
     scored: list[tuple[float, str, str]] = []
     for row in items:
         if not isinstance(row, dict):
@@ -627,6 +784,8 @@ def _rank_video_candidates(
         if isinstance(vid, str) and vid.startswith("/watch?v="):
             vid = vid.split("v=", 1)[-1]
         if not isinstance(vid, str) or not re.fullmatch(r"[\w-]{6,}", vid):
+            continue
+        if vid in skip:
             continue
         title = (row.get("title") or "").strip()
         if _AD_TITLE_RE.search(title):
@@ -661,7 +820,7 @@ def _rank_video_candidates(
         vid = row.get("videoId") or row.get("id") or row.get("url")
         if isinstance(vid, str) and vid.startswith("/watch?v="):
             vid = vid.split("v=", 1)[-1]
-        if isinstance(vid, str) and re.fullmatch(r"[\w-]{6,}", vid):
+        if isinstance(vid, str) and re.fullmatch(r"[\w-]{6,}", vid) and vid not in skip:
             title = (row.get("title") or "").strip()
             if not _AD_TITLE_RE.search(title):
                 return vid, title
@@ -673,6 +832,7 @@ def _piped_search(
     *,
     prefer_title: str = "",
     prefer_artist: str = "",
+    skip_video_ids: set[str] | None = None,
 ) -> tuple[str | None, str]:
     with httpx.Client(
         headers={"User-Agent": _DESKTOP_UA},
@@ -695,6 +855,7 @@ def _piped_search(
                     items,
                     prefer_title=prefer_title,
                     prefer_artist=prefer_artist,
+                    skip_video_ids=skip_video_ids,
                 )
                 if vid:
                     logger.info("Piped search %s → %s (%s)", base, vid, title)
@@ -768,6 +929,7 @@ def _invidious_search(
     *,
     prefer_title: str = "",
     prefer_artist: str = "",
+    skip_video_ids: set[str] | None = None,
 ) -> tuple[str | None, str]:
     with httpx.Client(
         headers={"User-Agent": _DESKTOP_UA},
@@ -790,6 +952,7 @@ def _invidious_search(
                     rows,
                     prefer_title=prefer_title,
                     prefer_artist=prefer_artist,
+                    skip_video_ids=skip_video_ids,
                 )
                 if vid:
                     logger.info("Invidious search %s → %s (%s)", base, vid, title)

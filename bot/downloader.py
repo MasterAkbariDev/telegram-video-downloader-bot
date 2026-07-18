@@ -133,6 +133,8 @@ def resolve_media(
     display_title: str | None = None,
 ) -> MediaResult:
     """Single-pass: extract once, then direct-send or download (no double fetch)."""
+    original_url = url
+    is_yt_music = "music.youtube.com" in url.lower()
     url = _normalize_media_url(url)
 
     # Spotify is DRM in yt-dlp — resolve via SoundCloud / mirrors instead
@@ -186,7 +188,7 @@ def resolve_media(
             display_title=display_title,
         )
 
-    audio_preferred = force_audio or _is_audio_url(url)
+    audio_preferred = force_audio or is_yt_music or _is_audio_url(url)
     job_id = uuid.uuid4().hex[:12]
     output_dir = DOWNLOAD_DIR / job_id
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -319,6 +321,33 @@ def resolve_media(
                     return album
             except Exception as ig_exc:
                 logger.warning("Instagram album fallback failed: %s", ig_exc)
+
+        # YouTube Music / Topic ids are often UNPLAYABLE — search for a match
+        if (
+            _is_youtube_url(url)
+            and not url.startswith(("ytsearch", "scsearch"))
+            and not force_audio
+        ):
+            from bot.spotify import (
+                is_youtube_unavailable_error,
+                resolve_unavailable_youtube,
+            )
+
+            if is_youtube_unavailable_error(exc):
+                try:
+                    return resolve_unavailable_youtube(
+                        original_url,
+                        progress_callback=progress_callback,
+                        cancel_check=cancel_check,
+                        prefer_audio=is_yt_music or audio_preferred,
+                    )
+                except Exception as yt_exc:
+                    logger.warning(
+                        "YouTube unavailable fallback failed for %s: %s",
+                        original_url,
+                        yt_exc,
+                    )
+                    raise yt_exc from exc
 
         job_id = uuid.uuid4().hex[:12]
         fallback_dir = DOWNLOAD_DIR / job_id
@@ -919,6 +948,11 @@ def _apply_network_opts(opts: dict) -> None:
         logger.debug("yt-dlp using cookies file %s", cookies)
     if YTDLP_PROXY:
         opts["proxy"] = YTDLP_PROXY
+    # YouTube n/sig challenges need a JS runtime (node is common on macOS/VPS)
+    for runtime in ("node", "deno", "bun"):
+        if shutil.which(runtime):
+            opts["js_runtimes"] = {runtime: {}}
+            break
     if shutil.which("aria2c"):
         opts["external_downloader"] = "aria2c"
         opts["external_downloader_args"] = {
@@ -1163,6 +1197,7 @@ def _is_audio_url(url: str) -> bool:
     audio_hosts = (
         "soundcloud.com",
         "music.apple.com",
+        "music.youtube.com",
         "deezer.com",
         "bandcamp.com",
     )

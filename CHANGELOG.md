@@ -2,6 +2,14 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.2 — 2026-07-18
+
+### Fixed
+- YouTube Music / Topic tracks that return “Video unavailable” now fall back to a
+  matching upload (YouTube search → mirrors → SoundCloud) using oEmbed title/artist
+- YouTube Music links download as audio
+- Enable Node as yt-dlp JS runtime when available (sig/n challenges)
+
 ## 1.8.1 — 2026-07-18
 
 ### Changed

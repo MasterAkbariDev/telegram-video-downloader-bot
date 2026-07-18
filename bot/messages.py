@@ -306,6 +306,11 @@ def friendly_error(raw: str) -> str:
             "This YouTube video isn’t available "
             "(removed, private, or blocked in this region)."
         )
+    if "no matching upload" in lower or "isn’t available and no matching" in lower:
+        return (
+            "This YouTube Music track isn’t available to download, "
+            "and no matching upload was found. Try a Spotify or SoundCloud link."
+        )
     if "too large" in lower or "exceeds" in lower or "50 mb" in lower:
         if "try a shorter" in lower or "telegram" in lower or "2 gb" in lower:
             return raw
