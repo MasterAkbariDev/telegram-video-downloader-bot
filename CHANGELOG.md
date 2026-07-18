@@ -1,0 +1,76 @@
+# Changelog
+
+All notable changes to this bot are documented here.
+
+## 1.6.9 — 2026-07-18
+
+### Changed
+- Cleaner welcome / help / about copy (YouTube, Instagram, SoundCloud only)
+- Removed inline-mode section from user messages
+- Update screens say “update” instead of `update.sh`
+
+## 1.6.8 — 2026-07-18
+
+### Fixed
+- Update check now uses `git fetch` + HTTP mirrors so latest GitHub version is detected reliably
+
+### Changed
+- Removed separate **Check for updates** button — **Update bot** checks GitHub first
+- Background update check every hour; admins still get **one DM per new version**
+
+## 1.6.7 — 2026-07-18
+
+### Fixed
+- Instagram multi-photo carousels failing with “video could not be found”
+- Scraper no longer bails when the page contains unrelated `video_url` blobs
+- Stronger parsing for `xdt_shortcode_media` / sidecar / `carousel_media`
+
+## 1.6.6 — 2026-07-18
+
+### Added
+- Changelog file and admin panel **Changelog** view
+- Startup update check: admins get a **one-time** DM when a newer version is on GitHub
+- Admin **Check for updates** button (manual)
+
+### Changed
+- Chat messages only trigger on **plain** Instagram / YouTube / SoundCloud links
+- Text-bound hyperlinks (`TEXT_LINK`) are ignored
+
+## 1.6.5 — 2026-07-18
+
+### Changed
+- Improved plain-URL extraction for Instagram, YouTube, and SoundCloud
+- UTF-16-safe Telegram entity parsing for links
+
+## 1.6.4 — 2026-07-17
+
+### Fixed
+- Instagram photos no longer flash caption/hashtags in status before send
+- Photos sent once as a reply with no caption
+- Inline link previews disabled for download results
+- Photo `file_id` cache stores `is_image` correctly
+
+## 1.6.3 — 2026-07-17
+
+### Fixed
+- Instagram videos no longer sent as poster photos with a play icon
+- Reels / video posts go through yt-dlp again
+
+### Added
+- Admin **Clear media cache** for testing after updates
+
+## 1.6.2 — 2026-07-17
+
+### Changed
+- Instagram images sent as normal Telegram photos again (not documents)
+
+## 1.6.1 — 2026-07-17
+
+### Changed
+- Media sent without captions
+- Prefer highest-resolution Instagram image CDN candidates
+
+## 1.6.0 — 2026-07-17
+
+### Added
+- Instagram photo posts and carousels as Telegram albums

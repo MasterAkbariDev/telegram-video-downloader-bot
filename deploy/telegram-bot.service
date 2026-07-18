@@ -1,0 +1,21 @@
+# Example systemd unit — do NOT copy directly.
+# Use:  chmod +x deploy/install-service.sh && ./deploy/install-service.sh
+#
+# install-service.sh auto-fills User, paths, and installs to /etc/systemd/system/
+
+[Unit]
+Description=Telegram Video Downloader Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USERNAME
+WorkingDirectory=/opt/telegram-video-downloader-bot
+ExecStart=/opt/telegram-video-downloader-bot/.venv/bin/python -m bot
+Restart=on-failure
+RestartSec=10
+EnvironmentFile=/opt/telegram-video-downloader-bot/.env
+
+[Install]
+WantedBy=multi-user.target
