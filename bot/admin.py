@@ -41,6 +41,7 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("📊 Statistics", callback_data="admin:stats")],
             [InlineKeyboardButton("👥 Recent downloads", callback_data="admin:logs")],
+            [InlineKeyboardButton("⚠️ Failures & requests", callback_data="admin:failures")],
             [InlineKeyboardButton("💾 Disk & storage", callback_data="admin:disk")],
             [InlineKeyboardButton("🗑 Clear media cache", callback_data="admin:cache")],
             [InlineKeyboardButton("📜 Changelog", callback_data="admin:changelog")],
@@ -197,6 +198,45 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="admin:home")]]),
             disable_web_page_preview=True,
+        )
+        return
+
+    if data == "admin:failures":
+        try:
+            text = _failures_text()
+        except Exception as exc:
+            logger.exception("Failures log error")
+            text = f"⚠️ <b>Failures &amp; requests</b>\n\n❌ Error: {esc(str(exc))}"
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🗑 Clear failures", callback_data="admin:failures_clear"
+                        )
+                    ],
+                    [InlineKeyboardButton("« Back", callback_data="admin:home")],
+                ]
+            ),
+            disable_web_page_preview=True,
+        )
+        return
+
+    if data == "admin:failures_clear":
+        try:
+            n = stats.clear_failures()
+            text = f"⚠️ <b>Failures &amp; requests</b>\n\nCleared <b>{n}</b> log entries."
+        except Exception as exc:
+            logger.exception("Clear failures error")
+            text = f"⚠️ <b>Failures &amp; requests</b>\n\n❌ {esc(str(exc))}"
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("« Back", callback_data="admin:home")]]
+            ),
         )
         return
 
@@ -456,6 +496,45 @@ def _logs_text() -> str:
         platform = row["platform"] or "?"
         size = format_size(row["file_size"]) if row["file_size"] else "?"
         lines.append(f"• {ts} · {esc(user)} · {platform} · {size}")
+    return "\n".join(lines)
+
+
+def _failures_text() -> str:
+    """Unsupported sites + extract failures — what to add or fix."""
+    hosts = stats.get_failure_host_counts(10)
+    rows = stats.get_recent_failures(15)
+    lines = [
+        "⚠️ <b>Failures &amp; requests</b>",
+        "",
+        "<i>Unsupported links users tried, and supported sites that broke.</i>",
+        "",
+    ]
+    if hosts:
+        lines.append("<b>Top hosts</b>")
+        for row in hosts:
+            kind = "➕ add?" if row["kind"] == "unsupported" else "🔧 broken?"
+            host = row["host"] or "?"
+            lines.append(f"• <code>{esc(host)}</code> · {row['n']}× · {kind}")
+        lines.append("")
+    if not rows:
+        lines.append("<i>No failures logged yet.</i>")
+        return "\n".join(lines)
+
+    lines.append("<b>Recent</b>")
+    for row in rows:
+        ts = (row["created_at"] or "")[:16].replace("T", " ")
+        kind = "unsupported" if row["kind"] == "unsupported" else "failed"
+        host = row["host"] or row["platform"] or "?"
+        err = (row["error"] or "").replace("\n", " ")
+        if len(err) > 80:
+            err = err[:79] + "…"
+        lines.append(f"• {ts} · <b>{kind}</b> · <code>{esc(host)}</code>")
+        if err and kind == "failed":
+            lines.append(f"  <i>{esc(err)}</i>")
+        url = row["url"] or ""
+        if url:
+            short = url if len(url) <= 60 else url[:59] + "…"
+            lines.append(f"  <code>{esc(short)}</code>")
     return "\n".join(lines)
 
 

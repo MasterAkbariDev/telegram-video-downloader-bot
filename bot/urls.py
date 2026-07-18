@@ -21,6 +21,8 @@ _SUPPORTED_HOSTS = (
     "tiktok.com",
     "x.com",
     "twitter.com",
+    "pinterest.com",
+    "pin.it",
     # Adult (yt-dlp + fallback extractors)
     "pornhub.com",
     "xvideos.com",
@@ -45,6 +47,7 @@ _PLAIN_URL_RE = re.compile(
     r"soundcloud\.com|on\.soundcloud\.com|m\.soundcloud\.com|"
     r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|m\.tiktok\.com|"
     r"x\.com|twitter\.com|"
+    r"pinterest\.com|pinterest\.[a-z.]+|pin\.it|"
     r"pornhub\.com|xvideos\.com|xhamster\.com|redtube\.com|xnxx\.com|"
     r"spankbang\.com|eporner\.com|youporn\.com|tube8\.com|"
     r"beeg\.com|beeg\.site|beeg\.team"
@@ -62,6 +65,7 @@ _BARE_URL_RE = re.compile(
     r"soundcloud\.com|"
     r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|"
     r"x\.com|twitter\.com|"
+    r"pinterest\.com|pin\.it|"
     r"pornhub\.com|xvideos\.com|xhamster\.com|redtube\.com|xnxx\.com|"
     r"spankbang\.com|eporner\.com|youporn\.com|tube8\.com|"
     r"beeg\.com|beeg\.site|beeg\.team"
@@ -83,6 +87,14 @@ def is_supported_url(url: str) -> bool:
     except ValueError:
         return False
     host = host.lower().removeprefix("www.")
+    if host == "pin.it" or host.endswith(".pin.it"):
+        return True
+    if (
+        host == "pinterest.com"
+        or host.endswith(".pinterest.com")
+        or host.startswith("pinterest.")
+    ):
+        return True
     return any(host == h or host.endswith("." + h) for h in _SUPPORTED_HOSTS)
 
 

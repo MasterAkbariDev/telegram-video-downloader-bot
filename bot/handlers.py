@@ -183,11 +183,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     urls = extract_urls_from_message(message)
     if not urls:
-        # Private chats: explain unsupported links. Groups: stay quiet.
-        chat = update.effective_chat
-        if chat and chat.type == ChatType.PRIVATE:
-            any_urls = extract_any_urls_from_message(message)
-            if any_urls:
+        # Record unsupported hosts for admin; reply only in private chats
+        any_urls = extract_any_urls_from_message(message)
+        if any_urls:
+            user = update.effective_user
+            chat = update.effective_chat
+            try:
+                platform, _ = detect_platform(any_urls[0])
+                stats.record_failure(
+                    kind="unsupported",
+                    url=any_urls[0],
+                    error="Unsupported site",
+                    user_id=user.id if user else None,
+                    username=user.username if user else None,
+                    chat_id=chat.id if chat else None,
+                    chat_type=chat.type if chat else None,
+                    platform=platform if platform != "Link" else None,
+                )
+            except Exception:
+                logger.exception("Failed to record unsupported link")
+            if chat and chat.type == ChatType.PRIVATE:
                 await message.reply_text(
                     msg.unsupported_link_message(any_urls[0]),
                     parse_mode=ParseMode.HTML,
@@ -534,6 +549,7 @@ async def _process_url(
         )
     except Exception as exc:
         logger.exception("Failed to process %s", url)
+        _record_failure(update, url, exc, user=user, message=message, kind="failed")
         await _stop_progress_worker(progress_queue, worker_task)
         await status_msg.edit_text(
             msg.error_message(url, msg.friendly_error(str(exc)), index=index, total=total),
@@ -621,6 +637,35 @@ def _record_success(update: Update, url: str, result, *, user=None, message=None
         platform=platform,
         file_size=result.file_size,
     )
+
+
+def _record_failure(
+    update: Update,
+    url: str,
+    exc: BaseException,
+    *,
+    user=None,
+    message=None,
+    kind: str = "failed",
+) -> None:
+    user = user or update.effective_user
+    chat = update.effective_chat
+    if message and message.chat:
+        chat = message.chat
+    platform, _ = detect_platform(url)
+    try:
+        stats.record_failure(
+            kind=kind,
+            url=url,
+            error=str(exc),
+            user_id=user.id if user else None,
+            username=user.username if user else None,
+            chat_id=chat.id if chat else None,
+            chat_type=chat.type if chat else None,
+            platform=platform,
+        )
+    except Exception:
+        logger.exception("Failed to record download failure")
 
 
 async def _upload_media_with_progress(

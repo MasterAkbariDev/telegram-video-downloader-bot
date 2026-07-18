@@ -39,6 +39,29 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_downloads_created ON downloads(created_at DESC)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS download_failures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                user_id INTEGER,
+                username TEXT,
+                chat_id INTEGER,
+                chat_type TEXT,
+                url TEXT NOT NULL,
+                host TEXT,
+                platform TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_failures_created ON download_failures(created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_failures_kind ON download_failures(kind)"
+        )
         conn.commit()
         _db_initialized = True
     finally:
@@ -77,6 +100,88 @@ def record_download(
             (user_id, username, chat_id, chat_type, url, platform, file_size, now),
         )
         conn.commit()
+
+
+def record_failure(
+    *,
+    kind: str,
+    url: str,
+    error: str | None = None,
+    user_id: int | None = None,
+    username: str | None = None,
+    chat_id: int | None = None,
+    chat_type: str | None = None,
+    platform: str | None = None,
+) -> None:
+    """Persist unsupported-link or failed-download events for the admin panel."""
+    from urllib.parse import urlparse
+
+    now = datetime.now(timezone.utc).isoformat()
+    host = ""
+    try:
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        host = ""
+    err = (error or "")[:500]
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO download_failures
+                (kind, user_id, username, chat_id, chat_type, url, host, platform, error, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                kind,
+                user_id,
+                username,
+                chat_id,
+                chat_type,
+                url[:2000],
+                host[:200],
+                platform,
+                err,
+                now,
+            ),
+        )
+        conn.commit()
+
+
+def get_recent_failures(limit: int = 20) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT kind, user_id, username, url, host, platform, error, created_at, chat_type
+            FROM download_failures
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_failure_host_counts(limit: int = 12) -> list[dict]:
+    """Top hosts among unsupported / failed downloads (what to consider adding or fixing)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT host, kind, COUNT(*) AS n
+            FROM download_failures
+            WHERE host IS NOT NULL AND host != ''
+            GROUP BY host, kind
+            ORDER BY n DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def clear_failures() -> int:
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM download_failures")
+        conn.commit()
+        return cur.rowcount
 
 
 def get_stats_summary() -> dict:

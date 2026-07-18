@@ -15,6 +15,8 @@ _PLATFORMS: tuple[tuple[str, str, str], ...] = (
     ("soundcloud.com", "SoundCloud", "🎧"),
     ("twitter.com", "X", "🐦"),
     ("x.com", "X", "🐦"),
+    ("pinterest.com", "Pinterest", "📌"),
+    ("pin.it", "Pinterest", "📌"),
     ("pornhub.com", "Pornhub", "🔞"),
     ("xvideos.com", "XVideos", "🔞"),
     ("xhamster.com", "xHamster", "🔞"),
@@ -41,8 +43,8 @@ START_TEXT = (
     "👋 <b>Welcome!</b>\n\n"
     "Send a video or music link and I’ll download it for you.\n\n"
     "<b>Supported</b>\n"
-    "▶️ YouTube · 📸 Instagram · 🎵 TikTok · 🐦 X · 🎧 SoundCloud\n"
-    "🔞 Adult sites (Pornhub, XVideos, Beeg, and more)\n\n"
+    "▶️ YouTube · 📸 Instagram · 🎵 TikTok · 🐦 X · 📌 Pinterest\n"
+    "🎧 SoundCloud · 🔞 Adult sites (Pornhub, XVideos, Beeg, …)\n\n"
     "<b>Groups</b>\n"
     "Add me to a group and paste links — no commands needed.\n\n"
     "<b>Commands</b>\n"
@@ -71,14 +73,14 @@ HELP_TEXT = (
     "2. Remove and re-add the bot to the group\n"
     "3. Allow the bot to send messages\n\n"
     "<b>Supported</b>\n"
-    "YouTube, Instagram, TikTok, X, SoundCloud, "
+    "YouTube, Instagram, TikTok, X, Pinterest, SoundCloud, "
     "and adult sites (Pornhub, XVideos, Beeg, and more)."
 )
 
 ABOUT_TEXT = (
     "ℹ️ <b>About</b>\n\n"
     "Downloads videos, photos, and music from "
-    "YouTube, Instagram, TikTok, X, SoundCloud, "
+    "YouTube, Instagram, TikTok, X, Pinterest, SoundCloud, "
     "and adult sites (Pornhub, XVideos, Beeg, and more).\n\n"
     "{version_block}\n\n"
     "<b>Limits</b>\n"
@@ -278,8 +280,8 @@ def unsupported_link_message(url: str | None = None) -> str:
         "❌ <b>Unsupported link</b>",
         "",
         "I only download from:",
-        "▶️ YouTube · 📸 Instagram · 🎵 TikTok · 🐦 X · 🎧 SoundCloud",
-        "🔞 Adult sites (Pornhub, XVideos, Beeg, …)",
+        "▶️ YouTube · 📸 Instagram · 🎵 TikTok · 🐦 X · 📌 Pinterest",
+        "🎧 SoundCloud · 🔞 Adult sites (Pornhub, XVideos, Beeg, …)",
     ]
     if url:
         lines.extend(["", f"<code>{esc(truncate_url(url))}</code>"])

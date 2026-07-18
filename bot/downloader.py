@@ -160,6 +160,7 @@ def resolve_media(
         )
         from bot.instagram import is_instagram_url, resolve_instagram_album
         from bot.twitter import is_x_url, resolve_x_post
+        from bot.pinterest import is_pinterest_url, resolve_pinterest
 
         if is_spotify_url(url):
             return resolve_spotify_via_youtube(
@@ -191,6 +192,15 @@ def resolve_media(
             )
             if post:
                 return post
+        # Pinterest pins (yt-dlp often misses still images)
+        if is_pinterest_url(url):
+            pin = resolve_pinterest(
+                url,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
+            if pin:
+                return pin
 
     # TikTok CDN cookies are bound to the extract session — download in one pass
     if _is_tiktok_url(url) and not force_audio:
