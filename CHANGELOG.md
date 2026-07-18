@@ -5,7 +5,8 @@ All notable changes to this bot are documented here.
 ## 1.8.4 — 2026-07-18
 
 ### Added
-- Pinterest pins (`pin.it` / `pinterest.com`) — images via CDN, videos downloaded
+- Pinterest pins (`pin.it` / `pinterest.com`) — images **and** videos via pinimg CDN
+  (Telegram fetches them; no VPS download)
 - Admin panel: **Failures & requests** log (unsupported sites users tried + broken
   supported downloads) with top hosts and clear button
 - Welcome / help / about list Pinterest with the other supported platforms

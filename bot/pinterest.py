@@ -5,15 +5,13 @@ from __future__ import annotations
 import html as html_lib
 import logging
 import re
-import uuid
-from pathlib import Path
 from typing import Callable
 from urllib.parse import unquote, urlparse
 
 import httpx
 
-from bot.config import DOWNLOAD_DIR, YTDLP_PROXY
-from bot.fast_download import DESKTOP_UA, download_http, make_client
+from bot.config import YTDLP_PROXY
+from bot.fast_download import DESKTOP_UA
 
 try:
     from bot.jobs import CancelCheck
@@ -62,7 +60,7 @@ def resolve_pinterest(
     progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
 ):
-    """Resolve a Pinterest pin to a photo (CDN) or video (download)."""
+    """Resolve a Pinterest pin — Telegram fetches pinimg CDN URLs directly."""
     from bot.downloader import MediaResult
 
     if cancel_check:
@@ -76,43 +74,18 @@ def resolve_pinterest(
 
     display = title or "Pinterest pin"
 
+    # Videos: pinimg CDN works with Telegram send_video (verified)
     if video_url:
         if progress_callback:
-            progress_callback("⬇️ <b>Downloading Pinterest video…</b>")
-        job_id = uuid.uuid4().hex[:12]
-        output_dir = DOWNLOAD_DIR / job_id
-        output_dir.mkdir(parents=True, exist_ok=True)
-        dest = output_dir / "pin.mp4"
-        try:
-            with make_client() as client:
-                download_http(
-                    client,
-                    video_url,
-                    dest,
-                    referer="https://www.pinterest.com/",
-                    progress_callback=progress_callback,
-                    cancel_check=cancel_check,
-                )
-            size = dest.stat().st_size
-            return MediaResult(
-                title=display,
-                is_audio=False,
-                file_size=size,
-                file_path=dest,
-                used_direct=False,
-                uploader="Pinterest",
-            )
-        except Exception:
-            # Clean failed download dir; fall through to image if any
-            try:
-                for p in output_dir.iterdir():
-                    p.unlink(missing_ok=True)
-                output_dir.rmdir()
-            except OSError:
-                pass
-            logger.warning("Pinterest video download failed for %s", url)
-            if not image_url:
-                raise
+            progress_callback("📤 <b>Sending Pinterest video…</b>")
+        return MediaResult(
+            title=display,
+            is_audio=False,
+            file_size=None,
+            direct_url=video_url,
+            used_direct=True,
+            uploader="Pinterest",
+        )
 
     if image_url:
         if progress_callback:
