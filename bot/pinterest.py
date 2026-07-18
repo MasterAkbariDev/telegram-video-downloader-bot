@@ -38,8 +38,13 @@ _ORIGINAL_IMG_RE = re.compile(
 )
 # Paths vary: /videos/720p/…, /videos/mc/h264/…, /videos/iht/expMp4/…_720w.mp4
 _VIDEO_RE = re.compile(
-    r"https://v\d*\.pinimg\.com/videos/(?:[^\"'\s<>]+/)*?"
-    r"(?:\d+p|h264|expMp4)/[^\"'\s<>]+\.mp4",
+    r"https://v\d*\.pinimg\.com/videos/(?:[^\"'\\]+/)*?"
+    r"(?:\d+p|h264|expMp4)/[^\"'\\]+\.mp4",
+    re.IGNORECASE,
+)
+# Broader fallback — any progressive pinimg MP4 under /videos/
+_VIDEO_RE_LOOSE = re.compile(
+    r"https://v\d*\.pinimg\.com/videos/[^\"'\\]+\.mp4",
     re.IGNORECASE,
 )
 
@@ -168,10 +173,16 @@ def _best_image(text: str) -> str | None:
     return None
 
 
+def _normalize_html(text: str) -> str:
+    # JSON embeds escape slashes as \/ or \u002F
+    return text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u002f", "/")
+
+
 def _best_video(text: str) -> str | None:
-    # JSON embeds often escape slashes as \/
-    normalized = text.replace("\\/", "/")
+    normalized = _normalize_html(text)
     urls = list(dict.fromkeys(_VIDEO_RE.findall(normalized)))
+    if not urls:
+        urls = list(dict.fromkeys(_VIDEO_RE_LOOSE.findall(normalized)))
     if not urls:
         return None
 

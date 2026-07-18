@@ -18,6 +18,7 @@ from yt_dlp.utils import DownloadError
 
 from bot.config import (
     DOWNLOAD_DIR,
+    FFMPEG_THREADS,
     INSTAGRAM_MIN_INTERVAL,
     MAX_VIDEO_HEIGHT,
     STANDARD_UPLOAD_LIMIT,
@@ -273,9 +274,10 @@ def resolve_media(
 
         if progress_callback:
             est = _estimate_size(info)
+            _set_progress_expected_total(opts, est)
             if est:
                 progress_callback(
-                    f"⬇️ <b>Downloading…</b> ({_format_size(est)} / {_format_size(get_max_file_size())} max)"
+                    f"⬇️ <b>Downloading…</b> (~{_format_size(est)} / {_format_size(get_max_file_size())} max)"
                 )
             else:
                 progress_callback("⬇️ <b>Starting download…</b>")
@@ -453,9 +455,6 @@ def download_from_info(
     output_dir = DOWNLOAD_DIR / job_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if progress_callback:
-        progress_callback("⬇️ <b>Downloading…</b>")
-
     opts = _build_ydl_opts(
         audio_preferred=audio_preferred,
         output_dir=output_dir,
@@ -467,6 +466,14 @@ def download_from_info(
 
     title = cached_info.get("title") or cached_info.get("id") or "media"
     is_audio = _result_is_audio(cached_info, url=url, audio_preferred=audio_preferred)
+
+    if progress_callback:
+        est = _estimate_size(cached_info)
+        _set_progress_expected_total(opts, est)
+        if est:
+            progress_callback(f"⬇️ <b>Downloading…</b> (~{_format_size(est)})")
+        else:
+            progress_callback("⬇️ <b>Downloading…</b>")
 
     if cancel_check:
         cancel_check()
@@ -752,18 +759,75 @@ def _extract_with_size_limit(
 
 
 def _estimate_size(info: dict) -> int | None:
-    """Best-effort size estimate from yt-dlp metadata."""
+    """Best-effort size estimate from yt-dlp metadata (filesize or bitrate×duration)."""
+    duration = info.get("duration")
+    try:
+        duration_f = float(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration_f = None
+
+    def _from_format(fmt: dict) -> int | None:
+        size = fmt.get("filesize") or fmt.get("filesize_approx")
+        if size:
+            try:
+                return int(size)
+            except (TypeError, ValueError):
+                pass
+        tbr = fmt.get("tbr")
+        if tbr and duration_f and duration_f > 0:
+            try:
+                # yt-dlp tbr is kbps → bytes
+                return int(float(tbr) * duration_f * 1000 / 8)
+            except (TypeError, ValueError):
+                return None
+        return None
+
     if info.get("requested_formats"):
         total = 0
         for fmt in info["requested_formats"]:
-            size = fmt.get("filesize") or fmt.get("filesize_approx")
-            if size:
-                total += size
-            else:
+            size = _from_format(fmt)
+            if not size:
+                total = 0
+                break
+            total += size
+        if total:
+            return total
+
+    top = info.get("filesize") or info.get("filesize_approx")
+    if top:
+        try:
+            return int(top)
+        except (TypeError, ValueError):
+            pass
+
+    from_top = _from_format(info)
+    if from_top:
+        return from_top
+
+    # Sum video+audio from selected format ids when present on formats list
+    formats = info.get("formats") or []
+    by_id = {f.get("format_id"): f for f in formats if f.get("format_id")}
+    fmt_id = info.get("format_id") or ""
+    if "+" in str(fmt_id):
+        total = 0
+        for part in str(fmt_id).split("+"):
+            fmt = by_id.get(part)
+            if not fmt:
                 return None
+            size = _from_format(fmt)
+            if not size:
+                return None
+            total += size
         return total or None
 
-    return info.get("filesize") or info.get("filesize_approx")
+    return None
+
+
+def _set_progress_expected_total(opts: dict, expected: int | None) -> None:
+    for hook in opts.get("progress_hooks") or []:
+        state = getattr(hook, "state", None)
+        if isinstance(state, dict):
+            state["expected"] = int(expected) if expected else None
 
 
 def _unwrap_search_or_single_entry(info: dict, url: str) -> dict:
@@ -1184,7 +1248,7 @@ def _build_ydl_opts(
                 "preferredquality": "128",
             }
         ]
-        opts["postprocessor_args"] = {"ffmpeg": ["-threads", "2"]}
+        opts["postprocessor_args"] = {"ffmpeg": ["-threads", str(FFMPEG_THREADS)]}
 
     return opts
 
@@ -1438,14 +1502,33 @@ def _result_is_audio(
 
 def _progress_hook(callback: ProgressCallback | None, cancel_check: CancelCheck | None = None):
     last_status = {"text": "", "at": 0.0}
+    state: dict = {"expected": None, "locked": None}
 
     def hook(d: dict) -> None:
         if cancel_check:
             cancel_check()
         status = d.get("status")
         if status == "downloading":
-            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            exact = d.get("total_bytes") or 0
+            rough = d.get("total_bytes_estimate") or 0
+            expected = state.get("expected") or 0
             downloaded = d.get("downloaded_bytes") or 0
+
+            # Prefer exact size; else stable metadata estimate; else lock first HLS guess
+            # so the displayed total doesn't bounce (63→193→180…) mid-download.
+            if exact:
+                total = int(exact)
+                state["locked"] = total
+            elif expected:
+                total = int(expected)
+                state["locked"] = total
+            elif state.get("locked"):
+                total = int(state["locked"])
+            elif rough:
+                total = int(rough)
+                state["locked"] = total
+            else:
+                total = 0
 
             if total and total > get_download_size_cap():
                 raise DownloadError(
@@ -1461,7 +1544,12 @@ def _progress_hook(callback: ProgressCallback | None, cancel_check: CancelCheck 
 
             from bot.messages import download_progress
 
-            text = download_progress(downloaded, total or None, max_bytes=get_max_file_size())
+            text = download_progress(
+                downloaded,
+                total or None,
+                max_bytes=get_max_file_size(),
+                approximate=bool(total and not exact),
+            )
         elif status == "finished":
             if not callback:
                 return
@@ -1479,6 +1567,7 @@ def _progress_hook(callback: ProgressCallback | None, cancel_check: CancelCheck 
         last_status["at"] = now
         callback(text)
 
+    hook.state = state  # type: ignore[attr-defined]
     return hook
 
 

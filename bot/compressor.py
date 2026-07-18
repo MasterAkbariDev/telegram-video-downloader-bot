@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Callable
 
-from bot.config import MAX_VIDEO_HEIGHT, get_compress_target_bytes, get_max_file_size
+from bot.config import FFMPEG_THREADS, MAX_VIDEO_HEIGHT, get_compress_target_bytes, get_max_file_size
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,7 @@ def compress_video(
         if cancel_check:
             cancel_check()
         scale = f"scale=-2:'min({h},ih)'"
-        if progress_callback:
-            progress_callback(f"🗜 <b>Compressing…</b> {h}p @ {kbps} kbps")
+        label = f"Compressing… {h}p @ {kbps} kbps"
         try:
             _run_ffmpeg(
                 path,
@@ -92,6 +92,9 @@ def compress_video(
                 mode="bitrate",
                 video_kbps=kbps,
                 scale=scale,
+                duration=duration,
+                label=label,
+                progress_callback=progress_callback,
                 cancel_check=cancel_check,
             )
         except Exception as exc:
@@ -164,19 +167,23 @@ def light_compress_video(
             mode="crf",
             crf=28,
             scale=scale,
+            duration=duration,
+            label="Compressing…",
+            progress_callback=progress_callback,
             cancel_check=cancel_check,
         )
         new_size = out.stat().st_size
         if new_size > target * 1.15:
             out.unlink(missing_ok=True)
-            if progress_callback:
-                progress_callback(f"🗜 <b>Compressing…</b> tighter pass @ {video_kbps} kbps")
             _run_ffmpeg(
                 path,
                 out,
                 mode="bitrate",
                 video_kbps=video_kbps,
                 scale=scale,
+                duration=duration,
+                label=f"Compressing… tighter @ {video_kbps} kbps",
+                progress_callback=progress_callback,
                 cancel_check=cancel_check,
             )
             new_size = out.stat().st_size
@@ -222,15 +229,22 @@ def _run_ffmpeg(
     mode: str,
     scale: str,
     cancel_check: CancelCheck | None,
+    duration: float = 0.0,
+    label: str = "Compressing…",
+    progress_callback: ProgressCallback | None = None,
     video_kbps: int | None = None,
     crf: int | None = None,
 ) -> None:
+    threads = str(FFMPEG_THREADS)
     cmd = [
         "ffmpeg",
         "-y",
         "-hide_banner",
         "-loglevel",
         "error",
+        "-progress",
+        "pipe:1",
+        "-nostats",
         "-i",
         str(src),
         "-vf",
@@ -239,6 +253,10 @@ def _run_ffmpeg(
         "libx264",
         "-preset",
         "veryfast",
+        "-threads",
+        threads,
+        "-filter_threads",
+        threads,
         "-c:a",
         "aac",
         "-b:a",
@@ -247,8 +265,6 @@ def _run_ffmpeg(
         "2",
         "-movflags",
         "+faststart",
-        "-threads",
-        "0",
     ]
     if mode == "crf":
         cmd.extend(["-crf", str(crf if crf is not None else 28)])
@@ -268,25 +284,59 @@ def _run_ffmpeg(
 
     proc = subprocess.Popen(
         cmd,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
     )
+    last_report = 0.0
     try:
+        assert proc.stdout is not None
         while True:
             if cancel_check:
                 cancel_check()
-            try:
-                proc.wait(timeout=0.5)
-                break
-            except subprocess.TimeoutExpired:
+            line = proc.stdout.readline()
+            if not line:
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.05)
                 continue
+            line = line.strip()
+            if line.startswith("out_time_ms=") and progress_callback and duration > 0:
+                try:
+                    out_ms = int(line.split("=", 1)[1])
+                except ValueError:
+                    continue
+                now = time.monotonic()
+                if now - last_report < 1.0 and out_ms / 1000 < duration:
+                    continue
+                last_report = now
+                from bot.messages import compress_progress
+
+                progress_callback(
+                    compress_progress(out_ms / 1_000_000.0, duration, label=label)
+                )
+            elif line == "progress=end" and progress_callback and duration > 0:
+                from bot.messages import compress_progress
+
+                progress_callback(compress_progress(duration, duration, label=label))
+
+        proc.wait(timeout=30)
         if proc.returncode != 0:
-            err = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace")[-500:]
+            err = ""
+            if proc.stderr:
+                err = proc.stderr.read()[-500:]
             raise RuntimeError(err or f"ffmpeg exit {proc.returncode}")
     except Exception:
         proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
         raise
     finally:
+        if proc.stdout:
+            proc.stdout.close()
         if proc.stderr:
             proc.stderr.close()
 

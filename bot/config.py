@@ -27,6 +27,9 @@ MAX_VIDEO_HEIGHT = _MAX_HEIGHT.get(QUALITY, 480)
 # even when 2 GB upload mode is on — keeps Instagram/reels snappy to send.
 COMPRESS_TARGET_MB = float(os.getenv("COMPRESS_TARGET_MB", "25"))
 
+# Cap libx264 threads so compression doesn't peg every CPU core (default 2).
+FFMPEG_THREADS = max(1, int(os.getenv("FFMPEG_THREADS", "2")))
+
 # Optional: Netscape cookies.txt for Instagram / login-required sites (see README)
 COOKIES_FILE = os.getenv("COOKIES_FILE", "").strip() or None
 YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip() or None

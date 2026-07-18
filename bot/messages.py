@@ -232,15 +232,43 @@ def download_progress(
     total: int | None,
     *,
     max_bytes: int | None = None,
+    approximate: bool = False,
 ) -> str:
     if total and total > 0:
         pct = min(100, downloaded / total * 100)
         bar = _progress_bar(pct)
-        size_line = f"{format_size(downloaded)} / {format_size(total)}"
+        approx = "~" if approximate else ""
+        size_line = f"{format_size(downloaded)} / {approx}{format_size(total)}"
         if max_bytes and total > max_bytes:
             size_line += f" · max {format_size(max_bytes)}"
         return f"⬇️ <b>Downloading…</b> {pct:.0f}%\n{bar}\n{size_line}"
     return f"⬇️ <b>Downloading…</b> {format_size(downloaded)}"
+
+
+def compress_progress(
+    current_sec: float,
+    duration_sec: float | None,
+    *,
+    label: str = "Compressing…",
+) -> str:
+    if duration_sec and duration_sec > 0:
+        pct = min(100.0, max(0.0, current_sec / duration_sec * 100))
+        bar = _progress_bar(pct)
+        return (
+            f"🗜 <b>{label}</b> {pct:.0f}%\n"
+            f"{bar}\n"
+            f"{_fmt_clock(current_sec)} / {_fmt_clock(duration_sec)}"
+        )
+    return f"🗜 <b>{label}</b>"
+
+
+def _fmt_clock(seconds: float) -> str:
+    total = max(0, int(seconds))
+    m, s = divmod(total, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
 
 
 def upload_progress(uploaded: int, total: int | None) -> str:

@@ -568,6 +568,25 @@ async def _process_url(
             media_cache.delete_cached(url)
             cached = None
 
+        # Stale Pinterest image cache: video pins were previously stored as
+        # poster photos before iht/expMp4 paths were recognized.
+        if cached and cached.is_image:
+            from bot.pinterest import is_pinterest_url, scrape_pinterest_pin
+
+            if is_pinterest_url(url):
+                try:
+                    _title, _image, video_url = scrape_pinterest_pin(url)
+                except Exception as exc:
+                    logger.warning("Pinterest cache re-check failed: %s", exc)
+                    video_url = None
+                if video_url:
+                    logger.warning(
+                        "Dropping stale Pinterest image cache for video pin %s",
+                        url[:80],
+                    )
+                    media_cache.delete_cached(url)
+                    cached = None
+
     if cached:
         logger.info("Cache hit for %s → file_id", url[:80])
         try:

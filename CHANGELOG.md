@@ -2,6 +2,18 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.7 — 2026-07-18
+
+### Fixed
+- Pinterest video pins kept sending the cached poster photo after the path fix;
+  stale image cache entries are dropped when the pin has an MP4
+- Download progress total for HLS (e.g. Pornhub) no longer jumps around — uses a
+  stable bitrate×duration estimate instead of fluctuating fragment guesses
+
+### Changed
+- ffmpeg compression capped to 2 threads by default (`FFMPEG_THREADS`)
+- Compression status shows a real progress bar (time encoded / duration)
+
 ## 1.8.6 — 2026-07-18
 
 ### Fixed
