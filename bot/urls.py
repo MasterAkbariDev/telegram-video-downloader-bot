@@ -18,6 +18,8 @@ _SUPPORTED_HOSTS = (
     "soundcloud.com",
     "on.soundcloud.com",
     "m.soundcloud.com",
+    "spotify.com",
+    "open.spotify.com",
     "tiktok.com",
     "x.com",
     "twitter.com",
@@ -45,6 +47,7 @@ _PLAIN_URL_RE = re.compile(
     r"instagram\.com|instagr\.am|"
     r"youtube\.com|youtu\.be|m\.youtube\.com|music\.youtube\.com|"
     r"soundcloud\.com|on\.soundcloud\.com|m\.soundcloud\.com|"
+    r"spotify\.com|open\.spotify\.com|"
     r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|m\.tiktok\.com|"
     r"x\.com|twitter\.com|"
     r"pinterest\.com|pinterest\.[a-z.]+|pin\.it|"
@@ -63,6 +66,7 @@ _BARE_URL_RE = re.compile(
     r"instagram\.com|instagr\.am|"
     r"youtube\.com|youtu\.be|"
     r"soundcloud\.com|"
+    r"spotify\.com|open\.spotify\.com|"
     r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|"
     r"x\.com|twitter\.com|"
     r"pinterest\.com|pin\.it|"

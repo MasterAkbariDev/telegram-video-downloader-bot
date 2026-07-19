@@ -2,6 +2,19 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.12 — 2026-07-19
+
+### Added
+- **Spotify track links** are accepted in chat and inline. Metadata reads
+  title/artist from Spotify embed when oEmbed omits the artist.
+
+### Changed
+- Music matching (Spotify / unavailable YouTube) searches **SoundCloud and
+  Audius in parallel**, then downloads the best match (YouTube search last)
+- Dropped public **Piped / Invidious / Mixcloud** music sources — instances
+  return 401/403 or streams with no usable audio
+- User status shows a single **Finding track…** step (no source-hunting stages)
+
 ## 1.8.11 — 2026-07-19
 
 ### Changed
