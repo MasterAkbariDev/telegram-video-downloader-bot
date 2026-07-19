@@ -178,20 +178,22 @@ By default, Telegram bots in groups only see messages that mention them. To let 
 
 ## Enable Inline Mode
 
-Use the bot as `@your_bot https://instagram.com/reel/…` in any chat:
+Use the bot as `@your_bot https://instagram.com/reel/…` in any chat (even ones the bot
+can't message):
 
-1. Open [@BotFather](https://t.me/BotFather)
-2. Send `/setinline`
-3. Select your bot
-4. Set placeholder text, e.g. `Paste a video link…`
-5. In any chat, type `@your_bot` + link → tap the result → bot downloads it
+1. Open [@BotFather](https://t.me/BotFather) → `/setinline` → placeholder e.g. `Paste a video link…`
+2. Open a private chat with the bot and tap `/start` once (needed to prepare the file)
+3. In any chat type `@your_bot` + link — wait a few seconds (nothing shows yet)
+4. Type the same `@your_bot` + link again → tap **📤 Send**
+
+If you've downloaded that link before, **Send** appears immediately.
 
 ## Usage
 
 | Action | How |
 |--------|-----|
 | Download a video | Send or paste any supported URL |
-| Inline download | `@your_bot https://instagram.com/reel/…` |
+| Inline download | `@bot URL` (wait) → `@bot URL` again → **Send** |
 | Get help | `/start` or `/help` |
 | Multiple links | Send a message with several URLs — each is processed |
 
@@ -327,7 +329,8 @@ source .venv/bin/activate && pip install -r requirements.txt
 → Privacy mode must be **Disabled** in @BotFather (`/setprivacy`). Then **remove and re-add** the bot to the group. Also check the bot has **Send Messages** permission. Shared Instagram posts hide the URL in a link preview — the latest version extracts those automatically.
 
 **Inline mode doesn't appear**
-→ Enable in @BotFather: `/setinline` → your bot → set placeholder text.
+→ Enable in @BotFather: `/setinline` → placeholder text.
+  Open a private chat with the bot (`/start`) before using inline Prepare.
 
 **"ffmpeg not found" errors**
 → Install ffmpeg: `brew install ffmpeg` (macOS) or `sudo apt install ffmpeg` (Ubuntu)

@@ -122,6 +122,125 @@ def upload_limit_label() -> str:
     return "2 GB" if large_upload_enabled() else "50 MB"
 
 
+async def materialize_file_id(
+    bot,
+    owner_chat_id: int,
+    result: MediaResult,
+    *,
+    caption: str = "",
+) -> tuple[str, str]:
+    """Upload media into owner_chat_id to obtain a reusable file_id, then delete the temp message.
+
+    Returns (file_id, kind) where kind is video|photo|audio.
+    Used by inline mode so media can be injected into chats the bot cannot message.
+    """
+    if result.telegram_file_id:
+        if result.is_image:
+            return result.telegram_file_id, "photo"
+        if result.is_audio:
+            return result.telegram_file_id, "audio"
+        return result.telegram_file_id, "video"
+
+    if result.album and len(result.album) > 1:
+        raise RuntimeError("Multi-item albums are not supported in inline mode.")
+
+    parse = ParseMode.HTML if caption else None
+    sent = None
+    kind = "video"
+
+    if result.is_image:
+        kind = "photo"
+        if result.direct_url:
+            sent = await bot.send_photo(
+                chat_id=owner_chat_id,
+                photo=result.direct_url,
+                caption=caption or None,
+                parse_mode=parse,
+                disable_notification=True,
+            )
+        elif result.file_path:
+            with result.file_path.open("rb") as fh:
+                sent = await bot.send_photo(
+                    chat_id=owner_chat_id,
+                    photo=InputFile(fh, filename=result.file_path.name),
+                    caption=caption or None,
+                    parse_mode=parse,
+                    disable_notification=True,
+                )
+        else:
+            raise RuntimeError("No image data to upload.")
+    elif result.is_audio:
+        kind = "audio"
+        if result.direct_url:
+            sent = await bot.send_audio(
+                chat_id=owner_chat_id,
+                audio=result.direct_url,
+                caption=caption or None,
+                parse_mode=parse,
+                title=(result.title or "audio")[:64],
+                disable_notification=True,
+            )
+        elif result.file_path:
+            with result.file_path.open("rb") as fh:
+                sent = await bot.send_audio(
+                    chat_id=owner_chat_id,
+                    audio=InputFile(fh, filename=result.file_path.name),
+                    caption=caption or None,
+                    parse_mode=parse,
+                    title=(result.title or "audio")[:64],
+                    disable_notification=True,
+                )
+        else:
+            raise RuntimeError("No audio data to upload.")
+    else:
+        kind = "video"
+        if result.direct_url:
+            sent = await bot.send_video(
+                chat_id=owner_chat_id,
+                video=result.direct_url,
+                caption=caption or None,
+                parse_mode=parse,
+                supports_streaming=True,
+                disable_notification=True,
+            )
+        elif result.file_path:
+            size = result.file_size or result.file_path.stat().st_size
+            if size > STANDARD_UPLOAD_LIMIT and not large_upload_enabled():
+                raise RuntimeError(
+                    f"File is {_human_size(size)} but upload limit is 50 MB."
+                )
+            if size > STANDARD_UPLOAD_LIMIT and large_upload_enabled():
+                # Telethon upload into owner chat, then read file_id via Bot API getUpdates is hard.
+                # Fall back: Telethon send, then we cannot easily get Bot API file_id.
+                # For inline CachedVideo we need Bot API file_id — require ≤50MB or compress first.
+                raise RuntimeError(
+                    f"File is {_human_size(size)} — inline Send needs ≤50 MB. "
+                    "Compress or paste the link in a private chat with the bot."
+                )
+            with result.file_path.open("rb") as fh:
+                sent = await bot.send_video(
+                    chat_id=owner_chat_id,
+                    video=InputFile(fh, filename=result.file_path.name),
+                    caption=caption or None,
+                    parse_mode=parse,
+                    supports_streaming=True,
+                    disable_notification=True,
+                )
+        else:
+            raise RuntimeError("No video data to upload.")
+
+    file_id = _file_id_from_message(sent, is_audio=(kind == "audio"), is_photo=(kind == "photo"))
+    if not file_id:
+        raise RuntimeError("Telegram did not return a file_id after upload.")
+
+    try:
+        await bot.delete_message(chat_id=owner_chat_id, message_id=sent.message_id)
+    except TelegramError as exc:
+        logger.info("Could not delete temp inline upload message: %s", exc)
+
+    return file_id, kind
+
+
 async def send_media(
     message: Message,
     result: MediaResult,
