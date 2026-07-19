@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import sqlite3
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 _DB = DATA_DIR / "media_cache.db"
 _lock = threading.Lock()
 _TTL_SECONDS = 14 * 24 * 3600  # Telegram file_ids usually last ~weeks; refresh within 14d
+_ALBUM_PREFIX = "album:"
 
 
 @dataclass
@@ -26,6 +28,11 @@ class CachedMedia:
     title: str
     file_size: int | None
     is_image: bool = False
+    album_items: list[dict] | None = None  # [{"file_id": str, "kind": "image"|"video"}, ...]
+
+    @property
+    def is_album(self) -> bool:
+        return bool(self.album_items and len(self.album_items) > 1)
 
 
 def cache_key(url: str) -> str:
@@ -91,12 +98,25 @@ def get_cached(url: str) -> CachedMedia | None:
     if time.time() - row[4] > _TTL_SECONDS:
         delete_cached(url)
         return None
+    raw_id = row[0]
+    album_items = None
+    file_id = raw_id
+    if raw_id.startswith(_ALBUM_PREFIX):
+        try:
+            album_items = json.loads(raw_id[len(_ALBUM_PREFIX) :])
+            if not isinstance(album_items, list) or not album_items:
+                album_items = None
+            else:
+                file_id = album_items[0].get("file_id") or raw_id
+        except json.JSONDecodeError:
+            album_items = None
     return CachedMedia(
-        file_id=row[0],
+        file_id=file_id,
         is_audio=bool(row[1]),
         title=row[2] or "media",
         file_size=row[3],
         is_image=bool(row[5]),
+        album_items=album_items,
     )
 
 
@@ -108,8 +128,13 @@ def store_cached(
     title: str,
     file_size: int | None = None,
     is_image: bool = False,
+    album_items: list[dict] | None = None,
 ) -> None:
-    if not file_id:
+    if album_items and len(album_items) > 1:
+        payload = _ALBUM_PREFIX + json.dumps(album_items, separators=(",", ":"))
+    elif file_id:
+        payload = file_id
+    else:
         return
     init_db()
     key = cache_key(url)
@@ -120,9 +145,14 @@ def store_cached(
             (cache_key, file_id, is_audio, title, file_size, created_at, is_image)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (key, file_id, int(is_audio), title[:200], file_size, time.time(), int(is_image)),
+            (key, payload, int(is_audio), title[:200], file_size, time.time(), int(is_image)),
         )
-    logger.info("Cached file_id for %s (image=%s)", key, is_image)
+    logger.info(
+        "Cached file_id for %s (image=%s album=%s)",
+        key,
+        is_image,
+        len(album_items) if album_items else 0,
+    )
 
 
 def delete_cached(url: str) -> None:

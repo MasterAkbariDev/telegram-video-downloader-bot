@@ -110,11 +110,12 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Inline mode: wait for prepare (spinner stays up), only offer Send when ready."""
+    """Inline mode: prepare in background; answer Send when ready (before query expires)."""
     inline = update.inline_query
     raw_query = (inline.query or "").strip()
     query = inline_cache.strip_inline_query(raw_query)
     user_id = inline.from_user.id if inline.from_user else 0
+    t0 = time.monotonic()
 
     logger.info(
         "Inline query from user %s: raw=%r cleaned=%r",
@@ -146,6 +147,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     urls = extract_urls(query)
     if not urls:
+        logger.info("Inline query had no supported URLs after parse")
         await inline.answer([], cache_time=5, is_personal=True)
         return
 
@@ -166,12 +168,16 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             need_prepare.append(url)
 
     if not need_prepare:
-        await inline.answer(results, cache_time=60, is_personal=True)
+        try:
+            await inline.answer(results, cache_time=60, is_personal=True)
+        except (BadRequest, TelegramError) as exc:
+            logger.warning("Inline answer failed (cached): %s", exc)
         return
 
-    # Cold path: start / reuse prepares, wait so Telegram keeps the loading spinner
+    # Cold path: start / reuse prepares. Telegram expires query_ids in ~10s —
+    # wait a bit for fast links, then answer (empty if still preparing).
     for url in need_prepare:
-        started = inline_cache.begin_prepare(url, user_id)
+        started = inline_cache.begin_prepare(url, user_id, force_retry=True)
         if started is not None:
             task = asyncio.create_task(
                 _inline_background_prepare(context.bot, user_id, url)
@@ -181,9 +187,18 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 "Inline cache miss %s — prepare queued",
                 media_cache.cache_key(url),
             )
+        else:
+            st = inline_cache.get_prepare(url)
+            logger.info(
+                "Inline prepare reuse %s status=%s task=%s",
+                media_cache.cache_key(url),
+                st.status if st else None,
+                bool(inline_cache.get_task(url)),
+            )
 
+    # Stay under Telegram's inline-query deadline (spinner dies if we answer too late)
     await asyncio.gather(
-        *(inline_cache.wait_until_ready(u, timeout=9.0) for u in need_prepare)
+        *(inline_cache.wait_until_ready(u, timeout=5.0) for u in need_prepare)
     )
 
     for url in need_prepare:
@@ -192,8 +207,32 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if cached and cached.file_id:
             results.append(_inline_cached_result(url, cached, name, emoji))
             inline_cache.clear_prepare(url)
+        else:
+            st = inline_cache.get_prepare(url)
+            logger.info(
+                "Inline not ready yet %s status=%s err=%s (%.1fs)",
+                media_cache.cache_key(url),
+                st.status if st else None,
+                (st.error[:80] if st and st.error else None),
+                time.monotonic() - t0,
+            )
 
-    await inline.answer(results, cache_time=30, is_personal=True)
+    try:
+        await inline.answer(results, cache_time=5 if not results else 30, is_personal=True)
+        logger.info(
+            "Inline answered user=%s results=%d elapsed=%.1fs",
+            user_id,
+            len(results),
+            time.monotonic() - t0,
+        )
+    except (BadRequest, TelegramError) as exc:
+        # Common on slow VPS: "query is too old" — prepare keeps running for next try
+        logger.warning(
+            "Inline answer failed after %.1fs (%d results): %s",
+            time.monotonic() - t0,
+            len(results),
+            exc,
+        )
 
 
 def _inline_cached_result(url: str, cached, name: str, emoji: str):
@@ -657,42 +696,66 @@ async def _process_url(
             media_cache.delete_cached(url)
             cached = None
 
-        # Stale Pinterest image cache: video pins were previously stored as
-        # poster photos before iht/expMp4 paths were recognized.
-        if cached and cached.is_image:
-            from bot.pinterest import is_pinterest_url, scrape_pinterest_pin
-
-            if is_pinterest_url(url):
-                try:
-                    _title, _image, video_url = scrape_pinterest_pin(url)
-                except Exception as exc:
-                    logger.warning("Pinterest cache re-check failed: %s", exc)
-                    video_url = None
-                if video_url:
-                    logger.warning(
-                        "Dropping stale Pinterest image cache for video pin %s",
-                        url[:80],
-                    )
-                    media_cache.delete_cached(url)
-                    cached = None
-
     if cached:
         logger.info("Cache hit for %s → file_id (skip stages)", url[:80])
         try:
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-            result = MediaResult(
-                title=cached.title,
-                is_audio=cached.is_audio,
-                file_size=cached.file_size,
-                telegram_file_id=cached.file_id,
-                is_image=cached.is_image,
-            )
-            await send_media(
-                message,
-                result,
-                _media_caption(url, result),
-                cancel_check=cancel_check,
-            )
+            if cached.is_album:
+                from telegram import InputMediaPhoto, InputMediaVideo
+
+                media_group = []
+                for i, item in enumerate(cached.album_items or []):
+                    fid = item.get("file_id")
+                    if not fid:
+                        continue
+                    caption = _media_caption(
+                        url,
+                        MediaResult(
+                            title=cached.title,
+                            is_audio=False,
+                            file_size=cached.file_size,
+                            is_image=cached.is_image,
+                        ),
+                    ) if i == 0 else None
+                    if item.get("kind") == "video":
+                        media_group.append(
+                            InputMediaVideo(
+                                media=fid,
+                                caption=caption,
+                                parse_mode=ParseMode.HTML if caption else None,
+                            )
+                        )
+                    else:
+                        media_group.append(
+                            InputMediaPhoto(
+                                media=fid,
+                                caption=caption,
+                                parse_mode=ParseMode.HTML if caption else None,
+                            )
+                        )
+                if not media_group:
+                    raise BadRequest("Empty album cache")
+                await message.reply_media_group(media=media_group[:10])
+                result = MediaResult(
+                    title=cached.title,
+                    is_audio=False,
+                    file_size=cached.file_size,
+                    is_image=cached.is_image,
+                )
+            else:
+                result = MediaResult(
+                    title=cached.title,
+                    is_audio=cached.is_audio,
+                    file_size=cached.file_size,
+                    telegram_file_id=cached.file_id,
+                    is_image=cached.is_image,
+                )
+                await send_media(
+                    message,
+                    result,
+                    _media_caption(url, result),
+                    cancel_check=cancel_check,
+                )
             if status_msg is not None:
                 try:
                     await status_msg.delete()
@@ -989,19 +1052,34 @@ def _uploader_from_url(url: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _store_file_id(url: str, result, file_id: str | None) -> None:
-    if not file_id:
+def _store_file_id(url: str, result, file_id) -> None:
+    """Persist Telegram file_id(s) for instant re-send. Accepts str or album item list."""
+    album_items = None
+    single_id = None
+    if isinstance(file_id, list):
+        album_items = [
+            item
+            for item in file_id
+            if isinstance(item, dict) and item.get("file_id")
+        ]
+        if len(album_items) == 1:
+            single_id = album_items[0]["file_id"]
+            album_items = None
+        elif len(album_items) < 2:
+            return
+    elif isinstance(file_id, str) and file_id:
+        single_id = file_id
+    else:
         return
-    # Don't cache multi-image albums (single file_id isn't enough)
-    if result.album and len(result.album) > 1:
-        return
+
     media_cache.store_cached(
         url,
-        file_id,
+        single_id or (album_items[0]["file_id"] if album_items else ""),
         is_audio=result.is_audio,
         is_image=bool(result.is_image),
         title=result.title,
         file_size=result.file_size,
+        album_items=album_items,
     )
 
 

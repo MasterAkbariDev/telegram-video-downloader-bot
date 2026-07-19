@@ -443,6 +443,26 @@ async def _send_album(
                     logger.warning("Could not send album caption separately: %s", cap_exc)
 
     if sent_list:
+        # Prefer returning all file_ids so albums can be cached for instant re-send
+        items = []
+        for sent in sent_list:
+            kind = "image"
+            fid = None
+            if sent.photo:
+                fid = sent.photo[-1].file_id
+                kind = "image"
+            elif sent.video:
+                fid = sent.video.file_id
+                kind = "video"
+            elif sent.document:
+                fid = sent.document.file_id
+                kind = "video"
+            if fid:
+                items.append({"file_id": fid, "kind": kind})
+        if len(items) > 1:
+            return items  # type: ignore[return-value]
+        if items:
+            return items[0]["file_id"]
         return _file_id_from_message(sent_list[0], is_audio=False, is_photo=True)
     return None
 

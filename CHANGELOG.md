@@ -6,13 +6,15 @@ All notable changes to this bot are documented here.
 
 ### Changed
 - **Inline mode redesign** — works in chats the bot can't message:
-  - First `@bot URL` prepares silently (spinner stays up to ~9s)
+  - First `@bot URL` prepares in the background (waits briefly for fast links)
   - When ready, only **📤 Send** is shown (Telegram `file_id` cache)
-  - Repeat of the same link is instant via cache (no re-download)
+  - Repeat of the same link is instant via cache (no re-download / no status stages)
   - Same URL is never prepared twice while in-flight; carousels use the first item
   - No Preparing placeholder and no ready DMs
+  - Slow VPS: answers before Telegram’s query expires; failed prepares retry on
+    the next search instead of staying empty
 - Cached links pasted in chat skip Extracting/Uploading status — media is
-  re-sent from the stored Telegram `file_id` immediately
+  re-sent from the stored Telegram `file_id` immediately (including photo albums)
 
 ## 1.8.7 — 2026-07-18
 

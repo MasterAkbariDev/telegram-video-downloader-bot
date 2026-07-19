@@ -11,8 +11,8 @@ from bot import media_cache
 
 _TTL_SECONDS = 600.0
 _MAX_ENTRIES = 500
-# How long to keep an error so we don't thrash the same broken link
-_ERROR_COOLDOWN_SECONDS = 120.0
+# Brief pause after a hard failure so we don't hammer the same broken link
+_ERROR_COOLDOWN_SECONDS = 20.0
 
 # Background prepare status keyed by media_cache.cache_key(url)
 _PREPARE: dict[str, "PrepareState"] = {}
@@ -65,8 +65,12 @@ def is_preparing(url: str) -> bool:
     return bool(state and state.status == "preparing")
 
 
-def begin_prepare(url: str, user_id: int) -> PrepareState | None:
-    """Mark URL as preparing. Returns None if already in-flight, cached, or cooling down."""
+def begin_prepare(url: str, user_id: int, *, force_retry: bool = False) -> PrepareState | None:
+    """Mark URL as preparing. Returns None if already in-flight or cached.
+
+    force_retry=True (inline queries): restart after errors so a VPS failure
+    doesn't permanently empty-answer until cooldown ends.
+    """
     _purge_expired()
     if media_cache.get_cached(url):
         return None
@@ -79,13 +83,13 @@ def begin_prepare(url: str, user_id: int) -> PrepareState | None:
         return None
     existing = _PREPARE.get(key)
     if existing and existing.status == "preparing":
-        existing.user_id = user_id
+        # Stale "preparing" with no live task — allow restart
+        if get_task(url) is not None:
+            existing.user_id = user_id
+            return None
+    if existing and existing.status == "ready" and media_cache.get_cached(url):
         return None
-    # Already prepared this session — do not re-download
-    if existing and existing.status == "ready":
-        return None
-    # Don't restart failed links immediately (stops album/error spam)
-    if existing and existing.status == "error":
+    if existing and existing.status == "error" and not force_retry:
         if time.monotonic() - existing.created_at < _ERROR_COOLDOWN_SECONDS:
             return None
     state = PrepareState(url=url, user_id=user_id)
