@@ -344,10 +344,54 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
     the exact same checkpoint and fails the same way, surfacing only a
     misleading version-mismatch message with no way to intervene.
     """
-    if not cl.bloks_caa_login_prepare(username=username):
-        raise RuntimeError("Instagram did not return an account-access token for this login attempt.")
+    from instagrapi.exceptions import (
+        BadPassword,
+        ChallengeRequired,
+        PleaseWaitFewMinutes,
+        TwoFactorRequired,
+    )
 
-    result = cl.bloks_caa_login_send_request(password, username=username, auto_prepare=False)
+    try:
+        if not cl.bloks_caa_login_prepare(username=username):
+            raise RuntimeError("Instagram did not return an account-access token for this login attempt.")
+        result = cl.bloks_caa_login_send_request(password, username=username, auto_prepare=False)
+    except ChallengeRequired as exc:
+        try:
+            resolved = cl.challenge_resolve(cl.last_json)
+        except Exception as resolve_exc:
+            raise RuntimeError(
+                f"Could not resolve Instagram's verification challenge: {resolve_exc}"
+            ) from resolve_exc
+        if not resolved:
+            raise RuntimeError("Instagram's verification challenge was not resolved.") from exc
+        return
+    except TwoFactorRequired as exc:
+        code = _totp_code() or (
+            code_provider(
+                username, "the verification code Instagram just sent (email, SMS, or authenticator app)"
+            )
+            or ""
+        ).strip()
+        if not code:
+            raise RuntimeError("No verification code was provided — login cancelled.") from exc
+        if not cl.login(username, password, verification_code=code):
+            raise RuntimeError("Instagram rejected that verification code.") from exc
+        return
+    except BadPassword as exc:
+        raise RuntimeError(
+            "Instagram rejected this login. This is usually NOT actually a "
+            "wrong password — Instagram's risk system flags logins from "
+            "server/datacenter IPs and fresh device fingerprints even with "
+            "correct credentials. Set INSTAGRAM_PROXY to a residential/mobile "
+            "proxy (most effective fix), or upload a cookies.txt exported "
+            "from a real browser session instead of automated login."
+        ) from exc
+    except PleaseWaitFewMinutes as exc:
+        raise RuntimeError(
+            "Instagram is rate-limiting login attempts on this account/IP — "
+            "wait 15–30 minutes before it retries automatically."
+        ) from exc
+
     if cl.bloks_apply_login_response(result):
         return  # logged in on the first pass, nothing more to do
 

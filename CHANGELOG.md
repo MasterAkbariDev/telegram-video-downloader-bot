@@ -2,6 +2,20 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.24 — 2026-09-21
+
+### Fixed
+- **Interactive login had no handling for `ChallengeRequired`/`BadPassword`/
+  `PleaseWaitFewMinutes`/`TwoFactorRequired` raised directly by the
+  lower-level CAA calls.** Moving to manual orchestration (1.8.18, for the
+  age checkpoint) bypassed `cl.login()`'s own exception handling without
+  replacing it — a challenge raised at the very first preflight call
+  (`bloks_caa_login_prepare`) surfaced as a bare, unhandled `challenge_required`
+  instead of being resolved interactively the way it already was before that
+  refactor. Restored: `ChallengeRequired` now resolves via `challenge_resolve()`
+  same as before, and the other three get the same clear messages the
+  non-interactive path already had.
+
 ## 1.8.23 — 2026-09-21
 
 ### Added
