@@ -226,6 +226,30 @@ def _totp_code() -> str:
     return pyotp.TOTP(cfg.INSTAGRAM_TOTP_SECRET).now()
 
 
+def _resume_two_factor(cl, code: str, exc) -> bool:
+    """Submit a 2FA/verification code against the SAME Bloks challenge the
+    failed cl.login() call already opened, instead of calling cl.login()
+    again from scratch.
+
+    Why: instagrapi's ClientError spreads the original CAA response onto the
+    raised exception as attributes (see ClientError.__init__), so it's still
+    available here even though the call that produced it already returned.
+    Calling cl.login() a second time re-runs the *entire* device-attestation
+    /Bloks CAA sequence from step 0 in the same process — which has been
+    reported (subzeroid/instagrapi#2807, open as of 2026-09) to make
+    Instagram respond with a misleading "needs_upgrade" / "Your version of
+    Instagram is out of date" rejection specifically for accounts that
+    require a verification code. Resuming the already-opened challenge
+    avoids replaying that sequence a second time.
+    """
+    login_json = dict(vars(exc))
+    resume = getattr(cl, "_login_with_bloks_two_factor", None)
+    if resume is None:
+        # instagrapi changed its internals — fall back to a full relogin.
+        return bool(cl.login(cl.username, cl.password, verification_code=code))
+    return bool(resume(code, login_json, exc))
+
+
 def _perform_login(cl, username: str, password: str, *, code_provider: CodeProvider | None) -> None:
     """Log `cl` in. With code_provider set, a 2FA/verification code or a
     checkpoint challenge is resolved interactively (the provider is asked for
@@ -258,11 +282,13 @@ def _perform_login(cl, username: str, password: str, *, code_provider: CodeProvi
         if not code:
             raise RuntimeError("No verification code was provided — login cancelled.") from exc
         try:
-            cl.login(username, password, verification_code=code)
+            resumed = _resume_two_factor(cl, code, exc)
         except Exception as retry_exc:
             raise RuntimeError(
                 f"Instagram rejected that verification code: {retry_exc}"
             ) from retry_exc
+        if not resumed:
+            raise RuntimeError("Instagram did not accept that verification code.") from exc
     except ChallengeRequired as exc:
         if code_provider is None:
             raise RuntimeError(

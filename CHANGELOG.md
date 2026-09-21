@@ -2,6 +2,18 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.16 — 2026-09-21
+
+### Fixed
+- **2FA code retry failed with "Your version of Instagram is out of date."**
+  Submitting the verification code called `cl.login()` a second time, which
+  replays the *entire* device-attestation/Bloks CAA sequence from scratch —
+  a known trigger (open upstream: subzeroid/instagrapi#2807) for Instagram
+  misreporting a needs_upgrade rejection on accounts that require a
+  verification code. Now the code is submitted against the *same* Bloks
+  challenge the first attempt already opened (instagrapi keeps that context
+  on the exception it raises), instead of restarting the whole login.
+
 ## 1.8.14 — 2026-09-21
 
 ### Fixed
