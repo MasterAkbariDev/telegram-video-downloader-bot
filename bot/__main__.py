@@ -25,6 +25,7 @@ from bot.handlers import (
     about_command,
     cancel_command,
     chosen_inline_result_handler,
+    handle_document,
     handle_message,
     help_command,
     inline_query_handler,
@@ -133,6 +134,11 @@ def main() -> None:
             (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
             handle_message,
         )
+    )
+    # Separate group: admin cookies.txt upload (document, no caption needed)
+    app.add_handler(
+        MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_document),
+        group=1,
     )
 
     print(f"Bot {format_version_label()} is running. Press Ctrl+C to stop.")

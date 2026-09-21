@@ -21,7 +21,7 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from bot import messages as msg
-from bot.admin import admin_keyboard_for_start, admin_settings_input
+from bot.admin import admin_document_input, admin_keyboard_for_start, admin_settings_input
 from bot.config import is_admin
 from bot import inline_cache
 from bot import media_cache
@@ -375,6 +375,10 @@ async def chosen_inline_result_handler(update: Update, context: ContextTypes.DEF
         chosen.result_id,
         (chosen.query or "")[:100],
     )
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await admin_document_input(update, context)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

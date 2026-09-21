@@ -347,7 +347,7 @@ def resolve_media(
         # Instagram image posts often fail yt-dlp ("no video formats")
         if _is_instagram_url(url) and not force_audio:
             try:
-                from bot.instagram import resolve_instagram_album
+                from bot.instagram import resolve_instagram_album, resolve_instagram_video
 
                 album = resolve_instagram_album(
                     url,
@@ -356,8 +356,15 @@ def resolve_media(
                 )
                 if album:
                     return album
+                video = resolve_instagram_video(
+                    url,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                )
+                if video:
+                    return video
             except Exception as ig_exc:
-                logger.warning("Instagram album fallback failed: %s", ig_exc)
+                logger.warning("Instagram scrape fallback failed: %s", ig_exc)
 
         # YouTube Music / Topic ids are often UNPLAYABLE — search for a match
         if (
@@ -420,6 +427,13 @@ def resolve_media(
                     url,
                 )
                 raise RuntimeError(youtube_bot_check_hint()) from exc
+            if _is_instagram_url(url) and is_instagram_login_required(exc):
+                logger.warning(
+                    "Instagram login wall (cookies=%s) for %s",
+                    get_cookies_file() or "none",
+                    url,
+                )
+                raise RuntimeError(instagram_login_hint()) from exc
             raise exc
 
 
@@ -1040,15 +1054,15 @@ def _uploader_from_info(info: dict | None) -> str | None:
 
 
 def _maybe_impersonate(opts: dict, url: str | None) -> None:
-    """TikTok requires TLS fingerprint impersonation (curl_cffi)."""
-    if not url or not _is_tiktok_url(url):
+    """TLS fingerprint impersonation (curl_cffi) — required for TikTok and Instagram GraphQL."""
+    if not url or not (_is_tiktok_url(url) or _is_instagram_url(url)):
         return
     try:
         from yt_dlp.networking.impersonate import ImpersonateTarget
 
         opts["impersonate"] = ImpersonateTarget.from_str("chrome")
     except Exception as exc:
-        logger.warning("TikTok impersonate unavailable (install curl_cffi): %s", exc)
+        logger.warning("Browser impersonate unavailable (install curl_cffi): %s", exc)
 
 
 def _instagram_throttle() -> None:
@@ -1065,6 +1079,7 @@ def _extract_cache_key(opts: dict) -> tuple:
         opts.get("format"),
         opts.get("cookiefile"),
         opts.get("proxy"),
+        str(opts.get("impersonate") or ""),
     )
 
 
@@ -1127,20 +1142,49 @@ def _instagram_extract(
     cancel_check: CancelCheck | None = None,
 ) -> dict:
     global _instagram_ydl, _instagram_ydl_key
+
+    from bot.instagram_auth import ensure_instagram_cookies, refresh_instagram_cookies
+
+    # Prefer auto-login cookies when INSTAGRAM_USERNAME/PASSWORD are set
+    ig_cookies = ensure_instagram_cookies()
+    if ig_cookies:
+        opts = {**opts, "cookiefile": ig_cookies}
+
     key = _extract_cache_key(opts)
     with _instagram_lock:
         _instagram_throttle()
-        if _instagram_ydl is None or _instagram_ydl_key != key:
+        try:
+            if _instagram_ydl is None or _instagram_ydl_key != key:
+                if _instagram_ydl is not None:
+                    _instagram_ydl.close()
+                _instagram_ydl = yt_dlp.YoutubeDL(opts)
+                _instagram_ydl_key = key
+            return _extract_info_with_retry(
+                _instagram_ydl,
+                url,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
+        except DownloadError as exc:
+            if not is_instagram_login_required(exc):
+                raise
+            # Session expired / login wall — refresh once and retry
+            logger.warning("Instagram auth failed — refreshing auto-login cookies")
+            refreshed = refresh_instagram_cookies()
+            if not refreshed:
+                raise
+            opts = {**opts, "cookiefile": refreshed}
+            key = _extract_cache_key(opts)
             if _instagram_ydl is not None:
                 _instagram_ydl.close()
             _instagram_ydl = yt_dlp.YoutubeDL(opts)
             _instagram_ydl_key = key
-        return _extract_info_with_retry(
-            _instagram_ydl,
-            url,
-            progress_callback=progress_callback,
-            cancel_check=cancel_check,
-        )
+            return _extract_info_with_retry(
+                _instagram_ydl,
+                url,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
 
 
 def _apply_network_opts(opts: dict) -> None:
@@ -1150,8 +1194,9 @@ def _apply_network_opts(opts: dict) -> None:
         logger.debug("yt-dlp using cookies file %s", cookies)
     if YTDLP_PROXY:
         opts["proxy"] = YTDLP_PROXY
-    # YouTube n/sig challenges need a JS runtime (node is common on macOS/VPS)
-    for runtime in ("node", "deno", "bun"):
+    # YouTube n-sig / EJS challenges need a JS runtime. Deno is yt-dlp's
+    # recommended runtime; Node only works if >=22 (common VPS images ship 18).
+    for runtime in ("deno", "node", "bun"):
         if shutil.which(runtime):
             opts["js_runtimes"] = {runtime: {}}
             break
@@ -1169,6 +1214,41 @@ def is_youtube_bot_check(exc: BaseException | str) -> bool:
         or "confirm you're not a bot" in text
         or "confirm you are not a bot" in text
         or ("not a bot" in text and "youtube" in text)
+    )
+
+
+def is_instagram_login_required(exc: BaseException | str) -> bool:
+    text = str(exc).lower()
+    return (
+        "empty media response" in text
+        or "login required" in text
+        or "rate-limit for accessing posts anonymously" in text
+        or ("instagram" in text and "cookies" in text)
+        or ("instagram" in text and "logged-in" in text)
+        or ("instagram" in text and "log in" in text)
+    )
+
+
+def instagram_login_hint() -> str:
+    from bot.instagram_auth import instagram_credentials_configured
+
+    cookies = get_cookies_file()
+    if instagram_credentials_configured():
+        return (
+            "Instagram auto-login hit a security checkpoint/2FA. "
+            "Open Instagram in a browser (same network), approve the login, "
+            "then retry — or export cookies to <code>data/cookies.txt</code>."
+        )
+    if cookies:
+        return (
+            "Instagram blocked anonymous access for this post (login wall). "
+            f"Refresh Instagram cookies in {cookies} from a logged-in browser, "
+            "then try again."
+        )
+    return (
+        "Instagram blocked anonymous access for this post. "
+        "Set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD in .env for auto-login, "
+        "or export cookies to <code>data/cookies.txt</code>."
     )
 
 

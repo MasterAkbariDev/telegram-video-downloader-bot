@@ -401,7 +401,19 @@ def friendly_error(raw: str) -> str:
             "Admins can enable 2 GB uploads via /admin → 🔑 2 GB upload API."
         )
     if "private" in lower or "login" in lower or "sign in" in lower:
+        if "instagram" in lower:
+            return (
+                "Instagram requires a logged-in session for this post. "
+                "Export Instagram cookies to <code>data/cookies.txt</code> "
+                "(COOKIES_FILE in .env), then try again."
+            )
         return "This content is private or requires a login."
+    if "empty media response" in lower or "logged-in" in lower and "instagram" in lower:
+        return (
+            "Instagram blocked anonymous access for this post. "
+            "Export cookies from a logged-in Instagram browser session to "
+            "<code>data/cookies.txt</code> (set COOKIES_FILE in .env)."
+        )
     if "410" in lower or " gone" in lower:
         return "This video was removed or is no longer available on the site."
     if "404" in lower or "not found" in lower:

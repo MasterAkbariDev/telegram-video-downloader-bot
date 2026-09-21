@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue as _queue
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -32,8 +33,22 @@ logger = logging.getLogger(__name__)
 
 AWAIT_API_ID = "admin_await_api_id"
 AWAIT_API_HASH = "admin_await_api_hash"
+AWAIT_IG_COOKIES = "admin_await_ig_cookies"
+AWAIT_IG_USERNAME = "admin_await_ig_username"
+AWAIT_IG_PASSWORD = "admin_await_ig_password"
+AWAIT_IG_PROXY = "admin_await_ig_proxy"
+AWAIT_IG_TOTP = "admin_await_ig_totp"
+AWAIT_IG_SIGNUP_USERNAME = "admin_await_ig_signup_username"
+AWAIT_IG_SIGNUP_PASSWORD = "admin_await_ig_signup_password"
+AWAIT_IG_SIGNUP_EMAIL = "admin_await_ig_signup_email"
+AWAIT_IG_SIGNUP_FULLNAME = "admin_await_ig_signup_fullname"
+IG_SIGNUP_DATA = "admin_ig_signup_data"
 
 MY_TELEGRAM_ORG = "https://my.telegram.org/apps"
+
+# admin user_id -> Queue, while that admin has a live interactive Instagram
+# login/signup waiting on a verification code they need to send in chat.
+_pending_ig_code_queues: dict[int, "_queue.Queue[str]"] = {}
 
 
 def admin_menu_keyboard() -> InlineKeyboardMarkup:
@@ -46,6 +61,7 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🗑 Clear media cache", callback_data="admin:cache")],
             [InlineKeyboardButton("📜 Changelog", callback_data="admin:changelog")],
             [InlineKeyboardButton("🔑 2 GB upload API", callback_data="admin:api")],
+            [InlineKeyboardButton("📸 Instagram cookies", callback_data="admin:ig_cookies")],
             [InlineKeyboardButton("⚡ Speed test", callback_data="admin:speedtest")],
             [InlineKeyboardButton("🔄 Update bot", callback_data="admin:update")],
             [InlineKeyboardButton("✕ Close", callback_data="admin:close")],
@@ -73,6 +89,41 @@ def update_confirm_keyboard() -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def ig_cookies_menu_keyboard() -> InlineKeyboardMarkup:
+    from bot.instagram_auth import instagram_cookies_status
+
+    status = instagram_cookies_status()
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if status["auto_login_configured"]:
+        rows.append(
+            [
+                InlineKeyboardButton("🔐 Login now", callback_data="admin:ig_login"),
+                InlineKeyboardButton("🚪 Logout", callback_data="admin:ig_logout"),
+            ]
+        )
+    rows.append([InlineKeyboardButton("➕ Create account", callback_data="admin:ig_signup")])
+    rows.append(
+        [
+            InlineKeyboardButton("✏️ Username", callback_data="admin:ig_username"),
+            InlineKeyboardButton("✏️ Password", callback_data="admin:ig_password"),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton("🌐 Proxy", callback_data="admin:ig_proxy"),
+            InlineKeyboardButton("🔑 TOTP secret", callback_data="admin:ig_totp"),
+        ]
+    )
+    rows.append([InlineKeyboardButton("⬆️ Upload cookies.txt", callback_data="admin:ig_cookies_upload")])
+    if status["exists"]:
+        rows.append(
+            [InlineKeyboardButton("🗑 Remove cookies", callback_data="admin:ig_cookies_clear")]
+        )
+    rows.append([InlineKeyboardButton("« Back", callback_data="admin:home")])
+    return InlineKeyboardMarkup(rows)
 
 
 def api_menu_keyboard() -> InlineKeyboardMarkup:
@@ -288,6 +339,133 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if data == "admin:ig_cookies":
+        await query.edit_message_text(
+            _ig_cookies_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=ig_cookies_menu_keyboard(),
+            disable_web_page_preview=True,
+        )
+        return
+
+    if data == "admin:ig_cookies_upload":
+        context.user_data[AWAIT_IG_COOKIES] = True
+        await query.message.reply_text(
+            "⬆️ <b>Send your cookies.txt file</b>\n\n"
+            "Export it from a browser logged into Instagram (Netscape format), "
+            "then send it here as a document. Or /cancel.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if data == "admin:ig_cookies_clear":
+        from bot.instagram_auth import INSTAGRAM_COOKIES_PATH
+
+        INSTAGRAM_COOKIES_PATH.unlink(missing_ok=True)
+        await query.edit_message_text(
+            _ig_cookies_text() + "\n\n✅ Cookies removed.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ig_cookies_menu_keyboard(),
+            disable_web_page_preview=True,
+        )
+        return
+
+    if data == "admin:ig_login":
+        from bot.instagram_auth import instagram_credentials_configured, interactive_login
+
+        if not instagram_credentials_configured():
+            await query.message.reply_text(
+                "❌ Set an Instagram username and password first (✏️ Username / ✏️ Password).",
+            )
+            return
+        admin_id = query.from_user.id
+        status_msg = await query.message.reply_text("🔐 <b>Logging in…</b>", parse_mode=ParseMode.HTML)
+        loop = asyncio.get_running_loop()
+        provider = _make_ig_code_provider(admin_id, context.bot, loop)
+        try:
+            result = await asyncio.to_thread(interactive_login, provider)
+            await status_msg.edit_text(
+                f"✅ Logged in as <code>{esc(result['username'])}</code>.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=ig_cookies_menu_keyboard(),
+            )
+        except Exception as exc:
+            logger.warning("Interactive Instagram login failed: %s", exc)
+            await status_msg.edit_text(
+                f"❌ Login failed: {esc(str(exc))}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=ig_cookies_menu_keyboard(),
+            )
+        return
+
+    if data == "admin:ig_logout":
+        from bot.instagram_auth import logout_instagram
+
+        status_msg = await query.message.reply_text("🚪 <b>Logging out…</b>", parse_mode=ParseMode.HTML)
+        try:
+            await asyncio.to_thread(logout_instagram)
+            await status_msg.edit_text(
+                "✅ Logged out — local session and cookies cleared.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=ig_cookies_menu_keyboard(),
+            )
+        except Exception as exc:
+            logger.warning("Instagram logout failed: %s", exc)
+            await status_msg.edit_text(
+                f"❌ Logout error: {esc(str(exc))}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=ig_cookies_menu_keyboard(),
+            )
+        return
+
+    if data == "admin:ig_username":
+        context.user_data[AWAIT_IG_USERNAME] = True
+        await query.message.reply_text(
+            "✏️ <b>Send the Instagram username</b>\n\nOr /cancel.", parse_mode=ParseMode.HTML
+        )
+        return
+
+    if data == "admin:ig_password":
+        context.user_data[AWAIT_IG_PASSWORD] = True
+        await query.message.reply_text(
+            "✏️ <b>Send the Instagram password</b>\n\nOr /cancel.", parse_mode=ParseMode.HTML
+        )
+        return
+
+    if data == "admin:ig_proxy":
+        context.user_data[AWAIT_IG_PROXY] = True
+        await query.message.reply_text(
+            "🌐 <b>Send a proxy URL</b> for Instagram login (residential/mobile "
+            "recommended), e.g. <code>http://user:pass@host:port</code>.\n\n"
+            "Send <code>clear</code> to remove it, or /cancel.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if data == "admin:ig_totp":
+        context.user_data[AWAIT_IG_TOTP] = True
+        await query.message.reply_text(
+            "🔑 <b>Send the TOTP seed</b> for automated 2FA (Instagram: Settings "
+            "→ Two-factor authentication → Authentication app → \"Can't scan the "
+            "QR code?\").\n\nSend <code>clear</code> to remove it, or /cancel.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if data == "admin:ig_signup":
+        context.user_data[IG_SIGNUP_DATA] = {}
+        context.user_data[AWAIT_IG_SIGNUP_USERNAME] = True
+        await query.message.reply_text(
+            "➕ <b>Create an Instagram account</b>\n\n"
+            "This uses email verification — have a real inbox ready; I'll ask "
+            "you to paste the code here when Instagram sends it. Success isn't "
+            "guaranteed — Instagram may still require a phone number or a "
+            "captcha this can't solve, especially from a server IP.\n\n"
+            "Send the desired <b>username</b>, or /cancel.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
     if data == "admin:api":
         await query.edit_message_text(
             _api_text(),
@@ -407,13 +585,59 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
 
+def _make_ig_code_provider(admin_id: int, bot, loop: asyncio.AbstractEventLoop):
+    """Bridge instagrapi's synchronous challenge_code_handler (called from a
+    worker thread) to a Telegram prompt+reply, so an interactive login/signup
+    can ask the admin for a verification code mid-flow."""
+
+    def provider(username: str, choice=None) -> str:
+        q: "_queue.Queue[str]" = _queue.Queue()
+        _pending_ig_code_queues[admin_id] = q
+        choice_label = {1: "email", 0: "SMS"}.get(choice, str(choice) if choice is not None else "unknown")
+        text = (
+            f"📩 <b>Instagram sent a verification code</b> ({esc(choice_label)}) "
+            f"for <code>{esc(username)}</code>.\n\nReply with the code, or /cancel."
+        )
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                bot.send_message(admin_id, text, parse_mode=ParseMode.HTML), loop
+            )
+            fut.result(timeout=15)
+        except Exception as exc:
+            logger.warning("Could not prompt admin for Instagram code: %s", exc)
+        try:
+            return q.get(timeout=300)
+        except _queue.Empty:
+            return ""
+        finally:
+            _pending_ig_code_queues.pop(admin_id, None)
+
+    return provider
+
+
+async def admin_ig_code_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Relay a text reply into a pending interactive-login/signup code request."""
+    if not _require_admin_dm(update):
+        return False
+    user = update.effective_user
+    if not user:
+        return False
+    q = _pending_ig_code_queues.get(user.id)
+    if q is None:
+        return False
+    text = (update.message.text or "").strip()
+    q.put(text)
+    await update.message.reply_text("⏳ Got it — resolving…")
+    return True
+
+
 async def admin_settings_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Handle admin replies when setting API credentials. Returns True if handled."""
+    """Handle admin replies when setting credentials. Returns True if handled."""
     if not _require_admin_dm(update):
         return False
 
-    if not (context.user_data.get(AWAIT_API_ID) or context.user_data.get(AWAIT_API_HASH)):
-        return False
+    if await admin_ig_code_input(update, context):
+        return True
 
     if context.user_data.get(AWAIT_API_ID):
         text = (update.message.text or "").strip()
@@ -447,7 +671,223 @@ async def admin_settings_input(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return True
 
+    if context.user_data.get(AWAIT_IG_USERNAME):
+        text = (update.message.text or "").strip().lstrip("@")
+        if not text:
+            await update.message.reply_text("Username can't be empty. Try again or /cancel.")
+            return True
+        env_store.update_env_value("INSTAGRAM_USERNAME", text)
+        context.user_data.pop(AWAIT_IG_USERNAME, None)
+        reload_settings()
+        await update.message.reply_text(
+            f"✅ Instagram username saved: <code>{esc(text)}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ig_cookies_menu_keyboard(),
+        )
+        return True
+
+    if context.user_data.get(AWAIT_IG_PASSWORD):
+        text = update.message.text or ""
+        if not text.strip():
+            await update.message.reply_text("Password can't be empty. Try again or /cancel.")
+            return True
+        env_store.update_env_value("INSTAGRAM_PASSWORD", text.strip())
+        context.user_data.pop(AWAIT_IG_PASSWORD, None)
+        reload_settings()
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        await update.message.reply_text(
+            "✅ Instagram password saved.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ig_cookies_menu_keyboard(),
+        )
+        return True
+
+    if context.user_data.get(AWAIT_IG_PROXY):
+        text = (update.message.text or "").strip()
+        context.user_data.pop(AWAIT_IG_PROXY, None)
+        if text.lower() in {"clear", "none", "remove", "-"}:
+            env_store.remove_env_key("INSTAGRAM_PROXY")
+            reload_settings()
+            await update.message.reply_text("✅ Instagram proxy cleared.", reply_markup=ig_cookies_menu_keyboard())
+            return True
+        env_store.update_env_value("INSTAGRAM_PROXY", text)
+        reload_settings()
+        await update.message.reply_text(
+            f"✅ Instagram proxy saved: <code>{esc(text)}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ig_cookies_menu_keyboard(),
+        )
+        return True
+
+    if context.user_data.get(AWAIT_IG_TOTP):
+        text = (update.message.text or "").strip().replace(" ", "")
+        context.user_data.pop(AWAIT_IG_TOTP, None)
+        if text.lower() in {"clear", "none", "remove", "-"}:
+            env_store.remove_env_key("INSTAGRAM_TOTP_SECRET")
+            reload_settings()
+            await update.message.reply_text("✅ TOTP secret cleared.", reply_markup=ig_cookies_menu_keyboard())
+            return True
+        env_store.update_env_value("INSTAGRAM_TOTP_SECRET", text)
+        reload_settings()
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        await update.message.reply_text(
+            "✅ TOTP secret saved.", reply_markup=ig_cookies_menu_keyboard()
+        )
+        return True
+
+    if await _admin_ig_signup_input(update, context):
+        return True
+
     return False
+
+
+async def _admin_ig_signup_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Multi-step wizard: username → password → email → full name → create."""
+    data = context.user_data.get(IG_SIGNUP_DATA)
+
+    if context.user_data.get(AWAIT_IG_SIGNUP_USERNAME):
+        text = (update.message.text or "").strip().lstrip("@")
+        if not text:
+            await update.message.reply_text("Username can't be empty. Try again or /cancel.")
+            return True
+        data["username"] = text
+        context.user_data.pop(AWAIT_IG_SIGNUP_USERNAME, None)
+        context.user_data[AWAIT_IG_SIGNUP_PASSWORD] = True
+        await update.message.reply_text("Now send the <b>password</b> for this account.", parse_mode=ParseMode.HTML)
+        return True
+
+    if context.user_data.get(AWAIT_IG_SIGNUP_PASSWORD):
+        text = update.message.text or ""
+        if len(text.strip()) < 6:
+            await update.message.reply_text("Password looks too short. Try again or /cancel.")
+            return True
+        data["password"] = text.strip()
+        context.user_data.pop(AWAIT_IG_SIGNUP_PASSWORD, None)
+        context.user_data[AWAIT_IG_SIGNUP_EMAIL] = True
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        await update.message.reply_text(
+            "Now send the <b>email address</b> to verify with (you'll need to "
+            "check its inbox for a code in a moment).",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    if context.user_data.get(AWAIT_IG_SIGNUP_EMAIL):
+        text = (update.message.text or "").strip()
+        if "@" not in text:
+            await update.message.reply_text("That doesn't look like an email. Try again or /cancel.")
+            return True
+        data["email"] = text
+        context.user_data.pop(AWAIT_IG_SIGNUP_EMAIL, None)
+        context.user_data[AWAIT_IG_SIGNUP_FULLNAME] = True
+        await update.message.reply_text(
+            "Optional: send a <b>full name</b> to display, or send <code>skip</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    if context.user_data.get(AWAIT_IG_SIGNUP_FULLNAME):
+        text = (update.message.text or "").strip()
+        data["full_name"] = "" if text.lower() == "skip" else text
+        context.user_data.pop(AWAIT_IG_SIGNUP_FULLNAME, None)
+        context.user_data.pop(IG_SIGNUP_DATA, None)
+
+        from bot.instagram_auth import create_instagram_account
+
+        admin_id = update.effective_user.id
+        status_msg = await update.message.reply_text(
+            "➕ <b>Creating account…</b> Instagram will email a code shortly.",
+            parse_mode=ParseMode.HTML,
+        )
+        loop = asyncio.get_running_loop()
+        provider = _make_ig_code_provider(admin_id, context.bot, loop)
+        try:
+            result = await asyncio.to_thread(
+                create_instagram_account,
+                code_provider=provider,
+                username=data["username"],
+                password=data["password"],
+                email=data["email"],
+                full_name=data.get("full_name", ""),
+            )
+            env_store.update_env_value("INSTAGRAM_USERNAME", result["username"])
+            env_store.update_env_value("INSTAGRAM_PASSWORD", data["password"])
+            reload_settings()
+            await status_msg.edit_text(
+                f"✅ Account created and logged in: <code>{esc(result['username'])}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=ig_cookies_menu_keyboard(),
+            )
+        except Exception as exc:
+            logger.warning("Instagram signup failed: %s", exc)
+            await status_msg.edit_text(
+                f"❌ Account creation failed: {esc(str(exc))}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=ig_cookies_menu_keyboard(),
+            )
+        return True
+
+    return False
+
+
+async def admin_document_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Handle an admin uploading cookies.txt. Returns True if handled."""
+    if not _require_admin_dm(update):
+        return False
+    if not context.user_data.get(AWAIT_IG_COOKIES):
+        return False
+
+    document = update.message.document
+    if not document:
+        return False
+
+    context.user_data.pop(AWAIT_IG_COOKIES, None)
+
+    if document.file_size and document.file_size > 2 * 1024 * 1024:
+        await update.message.reply_text(
+            "❌ That file is too large to be a cookies.txt export (>2 MB).",
+            reply_markup=admin_menu_keyboard(),
+        )
+        return True
+
+    try:
+        tg_file = await document.get_file()
+        raw = await tg_file.download_as_bytearray()
+    except Exception as exc:
+        logger.warning("Instagram cookies download failed: %s", exc)
+        await update.message.reply_text(
+            f"❌ Could not download that file: {esc(str(exc))}",
+            reply_markup=admin_menu_keyboard(),
+        )
+        return True
+
+    from bot.instagram_auth import save_uploaded_instagram_cookies
+
+    try:
+        save_uploaded_instagram_cookies(bytes(raw))
+    except ValueError as exc:
+        await update.message.reply_text(
+            f"❌ {esc(str(exc))}\n\nMake sure you exported a Netscape-format "
+            "cookies.txt while logged into Instagram, then try again.",
+            reply_markup=ig_cookies_menu_keyboard(),
+        )
+        return True
+
+    await update.message.reply_text(
+        "✅ Instagram cookies saved and validated.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_menu_keyboard(),
+    )
+    return True
 
 
 async def cancel_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -455,6 +895,23 @@ async def cancel_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     context.user_data.pop(AWAIT_API_ID, None)
     context.user_data.pop(AWAIT_API_HASH, None)
+    context.user_data.pop(AWAIT_IG_COOKIES, None)
+    context.user_data.pop(AWAIT_IG_USERNAME, None)
+    context.user_data.pop(AWAIT_IG_PASSWORD, None)
+    context.user_data.pop(AWAIT_IG_PROXY, None)
+    context.user_data.pop(AWAIT_IG_TOTP, None)
+    context.user_data.pop(AWAIT_IG_SIGNUP_USERNAME, None)
+    context.user_data.pop(AWAIT_IG_SIGNUP_PASSWORD, None)
+    context.user_data.pop(AWAIT_IG_SIGNUP_EMAIL, None)
+    context.user_data.pop(AWAIT_IG_SIGNUP_FULLNAME, None)
+    context.user_data.pop(IG_SIGNUP_DATA, None)
+
+    user = update.effective_user
+    if user:
+        q = _pending_ig_code_queues.get(user.id)
+        if q is not None:
+            q.put("")  # unblock any interactive login/signup waiting on a code
+
     await update.message.reply_text("Cancelled.", reply_markup=admin_menu_keyboard())
 
 
@@ -562,6 +1019,52 @@ def _cache_prompt_text() -> str:
         "This deletes saved Telegram shortcuts so the next request "
         "downloads fresh media (useful after updates).\n\n"
         "Stats and temp files are not affected."
+    )
+
+
+def _ig_cookies_text() -> str:
+    from bot.instagram_auth import instagram_cookies_status
+
+    status = instagram_cookies_status()
+    if not status["exists"]:
+        state = "❌ Not set — public posts only; private/checkpoint-gated posts will fail"
+    elif not status["valid"]:
+        state = "⚠️ File exists but looks invalid/expired — upload a fresh export"
+    else:
+        age = status["age_days"]
+        age_txt = f"{age:.1f} days old" if age is not None else "age unknown"
+        state = f"✅ Active ({age_txt})"
+
+    if status["auto_login_configured"]:
+        bits = [f"✅ <code>{esc(status['username'] or '')}</code>"]
+        bits.append("device session saved" if status["session_saved"] else "no saved session yet")
+        bits.append("proxy set" if status["proxy_configured"] else "⚠️ no proxy — higher risk of rejection")
+        bits.append("TOTP set" if status["totp_configured"] else "no TOTP (2FA accounts need this)")
+        auto_login = " · ".join(bits)
+        cooldown = status["cooldown_remaining_sec"]
+        if cooldown > 0:
+            auto_login += f"\n⏳ Cooling down after a failed attempt — {cooldown / 60:.0f} min left"
+    else:
+        auto_login = "❌ not configured"
+
+    return (
+        "📸 <b>Instagram</b>\n\n"
+        f"<b>Cookies:</b> {state}\n"
+        f"<b>Auto-login:</b> {auto_login}\n\n"
+        "Auto-login uses Instagram's mobile app login flow with a persisted "
+        "device fingerprint, and supports automated 2FA via TOTP. It works "
+        "best — and is far less likely to be rejected — with a <b>proxy</b> "
+        "set to a residential/mobile IP; server/datacenter IPs are what "
+        "Instagram's risk system flags hardest, sometimes rejecting even "
+        "correct credentials.\n\n"
+        "<b>🔐 Login now</b> resolves checkpoints interactively — if "
+        "Instagram sends a verification code, I'll ask you for it here.\n\n"
+        "Alternatively (or if you'd rather not store a password at all), "
+        "upload a <b>cookies.txt</b> exported from a real, logged-in browser "
+        "session (e.g. with the “Get cookies.txt LOCALLY” extension) — it "
+        "isn't refreshed automatically, so re-upload when it expires.\n\n"
+        "Either way: the account must <b>follow</b> a private account for its "
+        "posts to be downloadable — no login or cookie trick bypasses that."
     )
 
 

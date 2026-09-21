@@ -1,10 +1,13 @@
 """Bot configuration loaded from environment."""
 
+import logging
 import os
 from pathlib import Path
 import shutil
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
@@ -30,12 +33,31 @@ COMPRESS_TARGET_MB = float(os.getenv("COMPRESS_TARGET_MB", "25"))
 # Cap libx264 threads so compression doesn't peg every CPU core (default 2).
 FFMPEG_THREADS = max(1, int(os.getenv("FFMPEG_THREADS", "2")))
 
+# How many ffmpeg compressions may run at once. Each one uses up to
+# FFMPEG_THREADS threads with no cap otherwise, so concurrent downloads (e.g.
+# a busy group chat) could spawn N ffmpeg processes and drive CPU to 100%.
+# Default: fit within available cores (leaves headroom for the bot itself).
+_cpu_count = os.cpu_count() or 2
+MAX_CONCURRENT_COMPRESSIONS = max(
+    1, int(os.getenv("MAX_CONCURRENT_COMPRESSIONS", str(max(1, _cpu_count // FFMPEG_THREADS))))
+)
+
 # Optional: Netscape cookies.txt for Instagram / login-required sites (see README)
 COOKIES_FILE = os.getenv("COOKIES_FILE", "").strip() or None
 YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip() or None
 # Lower than 2s so Instagram feels snappy; raise if you hit 429s
 # Polite delay between Instagram yt-dlp extracts (seconds)
 INSTAGRAM_MIN_INTERVAL = float(os.getenv("INSTAGRAM_MIN_INTERVAL", "0.05"))
+# Optional Instagram auto-login (writes data/instagram_cookies.txt)
+INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "").strip() or None
+INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "").strip() or None
+# Dedicated proxy for Instagram login/session (falls back to YTDLP_PROXY).
+# Strongly recommended: a residential/mobile proxy. Instagram's risk system
+# flags logins from datacenter IPs — often rejecting even correct credentials.
+INSTAGRAM_PROXY = os.getenv("INSTAGRAM_PROXY", "").strip() or None
+# Authenticator-app TOTP seed — enables fully automated 2FA login via pyotp.
+# (Settings → Two-factor authentication → Authentication app, on the IG account)
+INSTAGRAM_TOTP_SECRET = os.getenv("INSTAGRAM_TOTP_SECRET", "").strip() or None
 
 STANDARD_UPLOAD_LIMIT = 50 * 1024 * 1024
 LARGE_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024
@@ -62,6 +84,7 @@ def reload_settings() -> None:
     """Reload .env — call after admin updates credentials."""
     global BOT_TOKEN, TELEGRAM_PROXY, TELEGRAM_API_ID, TELEGRAM_API_HASH, ADMIN_IDS, QUALITY, MAX_VIDEO_HEIGHT
     global COOKIES_FILE, YTDLP_PROXY, INSTAGRAM_MIN_INTERVAL, COMPRESS_TARGET_MB
+    global INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD, INSTAGRAM_PROXY, INSTAGRAM_TOTP_SECRET
 
     load_dotenv(ROOT_DIR / ".env", override=True)
     BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -75,6 +98,39 @@ def reload_settings() -> None:
     YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip() or None
     INSTAGRAM_MIN_INTERVAL = float(os.getenv("INSTAGRAM_MIN_INTERVAL", "0.05"))
     COMPRESS_TARGET_MB = float(os.getenv("COMPRESS_TARGET_MB", "25"))
+    INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "").strip() or None
+    INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "").strip() or None
+    INSTAGRAM_PROXY = os.getenv("INSTAGRAM_PROXY", "").strip() or None
+    INSTAGRAM_TOTP_SECRET = os.getenv("INSTAGRAM_TOTP_SECRET", "").strip() or None
+
+
+def cookies_file_looks_valid(path: Path) -> bool:
+    """
+    Sanity-check Netscape cookie format before handing it to yt-dlp.
+
+    yt-dlp/http.cookiejar raise a hard (uncaught) LoadError for a malformed
+    file — e.g. an empty file, an HTML error page, or a JSON cookie export —
+    which used to crash every single extraction that touched cookies. Treat
+    an invalid file as "no cookies" instead.
+    """
+    try:
+        if path.stat().st_size == 0:
+            return False
+        with path.open("r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Real cookie lines are 7 tab-separated fields (Netscape format)
+                if len(line.split("\t")) == 7:
+                    return True
+        return False
+    except OSError:
+        return False
+
+
+# Back-compat alias (kept private-looking for existing call sites in this file)
+_cookies_file_looks_valid = cookies_file_looks_valid
 
 
 def get_cookies_file() -> str | None:
@@ -82,10 +138,19 @@ def get_cookies_file() -> str | None:
     if COOKIES_FILE:
         path = Path(COOKIES_FILE)
         if path.is_file():
-            return str(path)
+            if _cookies_file_looks_valid(path):
+                return str(path)
+            logger.warning(
+                "COOKIES_FILE=%s does not look like a Netscape cookies file — ignoring it",
+                path,
+            )
     default = DATA_DIR / "cookies.txt"
     if default.is_file():
-        return str(default)
+        if _cookies_file_looks_valid(default):
+            return str(default)
+        logger.warning(
+            "%s does not look like a Netscape cookies file — ignoring it", default
+        )
     return None
 
 

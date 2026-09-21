@@ -127,14 +127,62 @@ sudo systemctl restart telegram-bot
 | **Security** | Never share `.env`; keep token secret |
 | **Groups** | Still disable privacy mode in @BotFather (`/setprivacy` → Disable) |
 
-### YouTube cookies (optional, fixes bot-check / Spotify fallbacks)
+### YouTube / Instagram cookies (optional)
 
-YouTube often blocks datacenter IPs. Export cookies from a **logged-in** browser and put them on the server:
+YouTube often blocks datacenter IPs. Instagram increasingly requires a
+**logged-in session** for reels/posts.
 
-1. Install a cookie export extension, e.g. **“Get cookies.txt LOCALLY”** (Chrome/Firefox).
-2. Open [youtube.com](https://www.youtube.com) while logged into Google.
-3. Export cookies → save as `cookies.txt` (Netscape format).
-4. Copy to the bot:
+**Option A — Instagram auto-login (fully automated)**
+
+Set in `.env`:
+
+```env
+INSTAGRAM_USERNAME=your_username
+INSTAGRAM_PASSWORD=your_password
+
+# Strongly recommended — see "Why a proxy" below
+INSTAGRAM_PROXY=http://user:pass@residential-proxy-host:port
+
+# Only if the account has authenticator-app 2FA enabled
+INSTAGRAM_TOTP_SECRET=your_totp_seed
+```
+
+The bot logs in using Instagram's **mobile app login flow** (via
+[instagrapi](https://github.com/subzeroid/instagrapi)), not a scraped web
+form — it persists a device fingerprint (`data/instagram_session.json`) so
+repeat logins look like the same trusted phone returning instead of a new
+device every time, which is what avoids most checkpoints. It saves
+`data/instagram_cookies.txt` and refreshes automatically every ~5 days or
+when Instagram rejects the current session, with a 30-minute cooldown after
+a failed attempt so it doesn't hammer your account.
+
+If the account has 2FA, `INSTAGRAM_TOTP_SECRET` generates codes automatically
+(get the seed from Instagram: Settings → Two-factor authentication →
+Authentication app → "Can't scan the QR code?"). **SMS-based 2FA can't be
+automated** this way — use an authenticator app instead, or Option B.
+
+**Why a proxy matters:** Instagram's risk system flags logins from
+server/datacenter IPs — it can reject even the *correct* password from a VPS,
+independent of any code fix. A residential/mobile proxy (`INSTAGRAM_PROXY`)
+is the single biggest factor in reliable automated login; without one,
+expect occasional rate-limits or rejected logins from cloud IP ranges. Use a
+throwaway/dedicated Instagram account, not your personal one — there's a
+real (if reduced) risk of a checkpoint or lock either way.
+
+**Option B — Upload cookies via the admin panel (no password stored, but manual)**
+
+Open the bot in Telegram as an admin → `/admin` → **📸 Instagram cookies** →
+**⬆️ Upload cookies.txt**, then send a `cookies.txt` file exported from a
+**real, logged-in browser session** (e.g. with the "Get cookies.txt LOCALLY"
+extension, while logged into instagram.com). Nothing but session cookies
+touches the server, and it avoids automated-login checks entirely — but
+cookies aren't refreshed automatically, so you re-upload by hand when they
+expire (you'll start seeing login-wall errors again).
+
+Note: either option only unlocks a private account's posts if the logged-in
+account actually **follows** it — no cookie or login trick bypasses that.
+
+**Option C — Export cookies to a file manually**
 
 ```bash
 # on your laptop
@@ -151,7 +199,27 @@ Or set an explicit path in `.env`:
 COOKIES_FILE=/opt/telegram-video-downloader-bot/data/cookies.txt
 ```
 
-Cookies expire; re-export if YouTube starts failing again. Prefer exporting from a session that has used the same IP as the VPS when possible.
+Cookies expire; re-export if YouTube or Instagram starts failing again. Prefer exporting from a session that has used the same IP as the VPS when possible.
+
+### YouTube PO Token provider (recommended — fixes HTTP 403 on most videos)
+
+YouTube now requires a valid **PO (proof-of-origin) Token** for nearly every
+format; without one, downloads fail with `HTTP Error 403: Forbidden` even
+though the video extracts fine. `setup.sh` installs this automatically when
+Docker is available. To set it up manually:
+
+```bash
+# 1. Deno (yt-dlp's recommended JS runtime — Node also works, but needs >=22)
+curl -fsSL https://deno.land/install.sh | sh -s -- -y
+ln -sf "$HOME/.deno/bin/deno" /usr/local/bin/deno
+
+# 2. PO Token provider (Docker)
+docker run -d --name bgutil-provider -p 127.0.0.1:4416:4416 \
+  --restart unless-stopped brainicism/bgutil-ytdlp-pot-provider
+```
+
+No further config needed — yt-dlp auto-detects the provider on `127.0.0.1:4416`
+and the plugin ships in `requirements.txt` (`bgutil-ytdlp-pot-provider`).
 
 ### Alternative: run in `screen` or `tmux` (quick & simple)
 
@@ -342,7 +410,14 @@ source .venv/bin/activate && pip install -r requirements.txt
 → Some Spotify tracks require premium or are region-locked. yt-dlp may fall back to a YouTube match.
 
 **Private Instagram/YouTube content**
-→ The bot cannot access login-protected or private content.
+→ Public Instagram reels increasingly need a logged-in session — upload
+cookies via `/admin` → 📸 Instagram cookies (see above). Truly private posts
+only work if the account behind those cookies follows the private account;
+there's no way around that.
+
+**YouTube fails with "HTTP Error 403: Forbidden"**
+→ Set up the PO Token provider (see above) — YouTube now requires one for
+nearly all formats.
 
 ## License
 

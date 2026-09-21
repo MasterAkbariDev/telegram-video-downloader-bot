@@ -242,42 +242,81 @@ def resolve_instagram_album(
                         item = fut.result()
                     except Exception as exc:
                         logger.warning("Instagram slide worker failed: %s", exc)
-                        continue
-                    if item:
-                        results[idx - 1] = item
+                        item = None
+                    results[idx - 1] = item
 
         album = [item for item in results if item is not None]
+        if not album:
+            _cleanup_dir(output_dir)
+            return None
+
+        logger.info(
+            "Instagram album %s: %d item(s) (%s)",
+            url[:80],
+            len(album),
+            ",".join(a.kind for a in album),
+        )
+        if len(album) == 1:
+            item = album[0]
+            return MediaResult(
+                title="Instagram post",
+                is_audio=False,
+                file_size=item.file_size,
+                file_path=item.path,
+                used_direct=False,
+                is_image=item.kind == "image",
+                uploader=_uploader_from_instagram_url(url),
+            )
+        return MediaResult(
+            # Never use Instagram og:title (full caption + hashtags) as media title
+            title="Instagram post",
+            is_audio=False,
+            file_size=sum((a.file_size or 0) for a in album) or None,
+            file_path=None,
+            used_direct=False,
+            is_image=all(a.kind == "image" for a in album),
+            album=album,
+            uploader=_uploader_from_instagram_url(url),
+        )
     except Exception:
         _cleanup_dir(output_dir)
         raise
 
-    if not album:
-        _cleanup_dir(output_dir)
+
+def resolve_instagram_video(
+    url: str,
+    *,
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+):
+    """
+    Best-effort single-video CDN resolve for reels/posts when yt-dlp fails.
+
+    Returns MediaResult with a progressive CDN URL, or None.
+    """
+    from bot.downloader import MediaResult
+
+    if cancel_check:
+        cancel_check()
+    if progress_callback:
+        progress_callback("📸 <b>Trying Instagram page scrape…</b>")
+
+    _title, slides = scrape_instagram_slides(url)
+    videos = [s for s in slides if s.kind == "video"]
+    if not videos:
         return None
 
-    total_size = sum(a.file_size or 0 for a in album)
-    only_images = all(a.kind == "image" for a in album)
-    # Single leftover video → yt-dlp (better mux / quality)
-    if not only_images and len(album) == 1 and album[0].kind == "video":
-        _cleanup_dir(output_dir)
-        return None
-
-    logger.info(
-        "Instagram album %s: %d item(s) (%s)",
-        url[:80],
-        len(album),
-        "images" if only_images else "mixed",
-    )
+    video_url = videos[0].url
+    logger.info("Instagram video scrape hit for %s → %s", url[:80], video_url[:100])
+    if progress_callback:
+        progress_callback("📤 <b>Sending Instagram video…</b>")
     return MediaResult(
-        # Never use Instagram og:title (full caption + hashtags) as media title
         title="Instagram post",
         is_audio=False,
-        file_size=total_size,
-        file_path=album[0].path if len(album) == 1 else None,
-        used_direct=False,
-        is_image=only_images,
-        # Single image: send as one photo (not a 1-item album)
-        album=album if len(album) > 1 else None,
+        file_size=None,
+        direct_url=video_url,
+        used_direct=True,
+        is_image=False,
         uploader=_uploader_from_instagram_url(url),
     )
 
@@ -848,11 +887,12 @@ def _fix_json(raw: str) -> str:
 
 
 def _load_cookie_header() -> str | None:
-    path = get_cookies_file()
+    from bot.instagram_auth import ensure_instagram_cookies
+
+    path = ensure_instagram_cookies() or get_cookies_file()
     if not path:
         return None
     try:
-        jar = httpx.Cookies()
         import http.cookiejar
 
         mozilla = http.cookiejar.MozillaCookieJar(path)

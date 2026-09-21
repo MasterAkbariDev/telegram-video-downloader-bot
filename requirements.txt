@@ -4,3 +4,12 @@ python-dotenv==1.0.1
 httpx[socks]>=0.27.0
 telethon>=1.36.0
 curl_cffi>=0.10.0
+# YouTube PO Token provider plugin — YouTube now 403s most/all formats without
+# a valid GVS PO Token. Needs the bgutil-provider Docker container (see README).
+bgutil-ytdlp-pot-provider>=2.0.0
+# Instagram auto-login — mobile private API client (device fingerprint +
+# session persistence, current Bloks/CAA login flow), far more reliable than
+# scraping the web login form.
+instagrapi>=3.0.0
+# TOTP codes for automated Instagram 2FA (INSTAGRAM_TOTP_SECRET)
+pyotp>=2.9.0

@@ -2,6 +2,58 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.13 — 2026-09-21
+
+### Fixed
+- **Critical:** a malformed `cookies.txt` (empty, wrong format, HTML error
+  page, etc.) crashed *every* download that touched cookies — including all
+  Instagram links — with a raw `does not look like a Netscape format cookies
+  file` error. Cookie files are now validated before use; an invalid one is
+  ignored (falls back to cookie-less / auto-login) instead of crashing.
+- **YouTube downloads failing with HTTP 403** on most/all links. YouTube now
+  requires a valid PO (proof-of-origin) Token for nearly every format, and the
+  bundled JS-challenge solver needs Node **22+** (many servers ship 18, which
+  silently failed). Fixed by preferring **Deno** as the JS runtime and adding
+  support for a **bgutil PO Token provider** (see README) — both verified
+  fixing real 403s end-to-end.
+- Instagram auto-login retried on **every single request** when credentials
+  were invalid, adding a failed login round-trip to every download. Now backs
+  off for 30 minutes after a failure instead of retrying every time.
+- **Instagram auto-login rewritten on `instagrapi`** (mobile app / Bloks
+  login flow) instead of a scraped web-login form. Persists a device
+  fingerprint + session (`data/instagram_session.json`) across restarts so
+  repeat logins look like the same trusted phone, not a new device every
+  time — this is what actually avoids most checkpoints. Verified this gets
+  meaningfully further than the old flow (through the full device-attestation
+  login sequence) instead of a generic rejected-credentials response.
+- Added automated 2FA support via `INSTAGRAM_TOTP_SECRET` (authenticator-app
+  codes generated with `pyotp` — no human needs to type a code) and a
+  dedicated `INSTAGRAM_PROXY` option — server/datacenter IPs are what
+  Instagram's risk system flags hardest, sometimes rejecting even correct
+  credentials, so a residential/mobile proxy is the biggest lever for
+  reliable automated login.
+- ffmpeg compression had no concurrency limit — several videos compressing at
+  once (e.g. a busy group chat) could spawn unbounded ffmpeg processes and
+  drive CPU to 100%. Compression is now capped to fit available cores, and
+  runs at lower CPU/IO priority (`nice`/`ionice`) so it doesn't starve the bot.
+
+### Added
+- **Admin panel → 📸 Instagram**, fully rebuilt:
+  - **🔐 Login now** — triggers a login on demand and resolves checkpoint
+    challenges *interactively*: if Instagram asks for a verification code,
+    the bot asks the admin for it in chat and feeds it back into the login.
+  - **🚪 Logout** — invalidates the session with Instagram (when possible)
+    and clears the local session/cookies.
+  - **✏️ Username / ✏️ Password / 🌐 Proxy / 🔑 TOTP secret** — edit auto-login
+    settings from the bot instead of SSH + `.env`.
+  - **➕ Create account** — a guided, admin-driven signup wizard (username →
+    password → email → name) using Instagram's email-verification signup
+    flow; the bot relays the emailed code request into chat. Not guaranteed
+    to succeed — Instagram may still demand a phone number or a captcha this
+    can't solve, especially from a server IP — but it's there.
+  - **⬆️ Upload cookies.txt** (unchanged): a no-password alternative to
+    auto-login, exported from a real logged-in browser session.
+
 ## 1.8.12 — 2026-07-19
 
 ### Added
@@ -14,6 +66,10 @@ All notable changes to this bot are documented here.
 - Dropped public **Piped / Invidious / Mixcloud** music sources — instances
   return 401/403 or streams with no usable audio
 - User status shows a single **Finding track…** step (no source-hunting stages)
+- Instagram: browser TLS impersonation enabled; login-wall / empty-media errors
+  now tell you to add Instagram cookies instead of dumping yt-dlp text
+- Instagram **auto-login** via `INSTAGRAM_USERNAME` / `INSTAGRAM_PASSWORD` in
+  `.env` (saves `data/instagram_cookies.txt`, refreshes on auth failures)
 
 ## 1.8.11 — 2026-07-19
 

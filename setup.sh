@@ -73,6 +73,45 @@ else
     fi
 fi
 
+# --- Deno (yt-dlp's recommended JS runtime for YouTube n-sig/EJS challenges) ---
+# Node also works, but yt-dlp-ejs needs Node >=22; many VPS images ship 18.
+if command -v deno &>/dev/null; then
+    ok "deno found ($(deno --version 2>&1 | head -1))"
+else
+    warn "deno not found — installing (needed to solve YouTube's JS challenges)…"
+    if curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null 2>&1; then
+        ln -sf "$HOME/.deno/bin/deno" /usr/local/bin/deno 2>/dev/null || true
+        if command -v deno &>/dev/null; then
+            ok "deno installed"
+        else
+            warn "deno installed to ~/.deno/bin — add it to PATH, or yt-dlp falls back to node/bun"
+        fi
+    else
+        warn "deno install failed — YouTube downloads may be degraded without a JS runtime"
+    fi
+fi
+
+# --- Instagram/YouTube helper: bgutil PO Token provider (Docker, optional) ---
+# YouTube now requires a valid PO Token for most formats. Without this, most
+# YouTube links will fail with HTTP 403 even though extraction succeeds.
+if command -v docker &>/dev/null; then
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx bgutil-provider; then
+        ok "bgutil PO Token provider already running"
+    else
+        info "Starting bgutil PO Token provider (Docker, fixes YouTube 403s)…"
+        if docker run -d --name bgutil-provider -p 127.0.0.1:4416:4416 \
+            --restart unless-stopped brainicism/bgutil-ytdlp-pot-provider >/dev/null 2>&1; then
+            ok "bgutil PO Token provider started on 127.0.0.1:4416"
+        else
+            warn "Could not start bgutil-provider container (may already exist under a different state)"
+        fi
+    fi
+else
+    warn "Docker not found — skipping bgutil PO Token provider."
+    warn "YouTube downloads will likely fail with HTTP 403 without it."
+    warn "Install Docker, then: docker run -d --name bgutil-provider -p 127.0.0.1:4416:4416 --restart unless-stopped brainicism/bgutil-ytdlp-pot-provider"
+fi
+
 # --- Virtual environment ---
 _venv_ok() {
     [[ -f ".venv/bin/activate" ]] && [[ -x ".venv/bin/python" ]]

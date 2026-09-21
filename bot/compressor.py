@@ -5,11 +5,18 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Callable
 
-from bot.config import FFMPEG_THREADS, MAX_VIDEO_HEIGHT, get_compress_target_bytes, get_max_file_size
+from bot.config import (
+    FFMPEG_THREADS,
+    MAX_CONCURRENT_COMPRESSIONS,
+    MAX_VIDEO_HEIGHT,
+    get_compress_target_bytes,
+    get_max_file_size,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +27,11 @@ CancelCheck = Callable[[], None]
 LIGHT_COMPRESS_MIN_BYTES = 3 * 1024 * 1024
 # Hard compress: only when over soft Telegram-friendly target
 HARD_COMPRESS_MIN_BYTES = 8 * 1024 * 1024
+
+# Bounds how many ffmpeg processes run at once — without this, concurrent
+# downloads (e.g. a busy group chat) can spawn unlimited ffmpeg processes
+# and drive CPU to 100%, stalling the bot for everyone.
+_COMPRESS_SLOTS = threading.Semaphore(MAX_CONCURRENT_COMPRESSIONS)
 
 
 def ffmpeg_available() -> bool:
@@ -236,7 +248,7 @@ def _run_ffmpeg(
     crf: int | None = None,
 ) -> None:
     threads = str(FFMPEG_THREADS)
-    cmd = [
+    cmd = _nice_prefix() + [
         "ffmpeg",
         "-y",
         "-hide_banner",
@@ -282,63 +294,82 @@ def _run_ffmpeg(
         )
     cmd.append(str(dest))
 
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    last_report = 0.0
-    try:
-        assert proc.stdout is not None
-        while True:
+    if not _COMPRESS_SLOTS.acquire(blocking=False):
+        if progress_callback:
+            progress_callback("⏳ <b>Queued…</b> (busy compressing other files)")
+        while not _COMPRESS_SLOTS.acquire(timeout=1.0):
             if cancel_check:
                 cancel_check()
-            line = proc.stdout.readline()
-            if not line:
-                if proc.poll() is not None:
-                    break
-                time.sleep(0.05)
-                continue
-            line = line.strip()
-            if line.startswith("out_time_ms=") and progress_callback and duration > 0:
-                try:
-                    out_ms = int(line.split("=", 1)[1])
-                except ValueError:
-                    continue
-                now = time.monotonic()
-                if now - last_report < 1.0 and out_ms / 1000 < duration:
-                    continue
-                last_report = now
-                from bot.messages import compress_progress
-
-                progress_callback(
-                    compress_progress(out_ms / 1_000_000.0, duration, label=label)
-                )
-            elif line == "progress=end" and progress_callback and duration > 0:
-                from bot.messages import compress_progress
-
-                progress_callback(compress_progress(duration, duration, label=label))
-
-        proc.wait(timeout=30)
-        if proc.returncode != 0:
-            err = ""
-            if proc.stderr:
-                err = proc.stderr.read()[-500:]
-            raise RuntimeError(err or f"ffmpeg exit {proc.returncode}")
-    except Exception:
-        proc.kill()
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        last_report = 0.0
         try:
-            proc.wait(timeout=5)
+            assert proc.stdout is not None
+            while True:
+                if cancel_check:
+                    cancel_check()
+                line = proc.stdout.readline()
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                    continue
+                line = line.strip()
+                if line.startswith("out_time_ms=") and progress_callback and duration > 0:
+                    try:
+                        out_ms = int(line.split("=", 1)[1])
+                    except ValueError:
+                        continue
+                    now = time.monotonic()
+                    if now - last_report < 1.0 and out_ms / 1000 < duration:
+                        continue
+                    last_report = now
+                    from bot.messages import compress_progress
+
+                    progress_callback(
+                        compress_progress(out_ms / 1_000_000.0, duration, label=label)
+                    )
+                elif line == "progress=end" and progress_callback and duration > 0:
+                    from bot.messages import compress_progress
+
+                    progress_callback(compress_progress(duration, duration, label=label))
+
+            proc.wait(timeout=30)
+            if proc.returncode != 0:
+                err = ""
+                if proc.stderr:
+                    err = proc.stderr.read()[-500:]
+                raise RuntimeError(err or f"ffmpeg exit {proc.returncode}")
         except Exception:
-            pass
-        raise
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            raise
+        finally:
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
     finally:
-        if proc.stdout:
-            proc.stdout.close()
-        if proc.stderr:
-            proc.stderr.close()
+        _COMPRESS_SLOTS.release()
+
+
+def _nice_prefix() -> list[str]:
+    """Lower ffmpeg's scheduling/IO priority so it doesn't starve the bot itself."""
+    prefix: list[str] = []
+    if shutil.which("nice"):
+        prefix.extend(["nice", "-n", "15"])
+    if shutil.which("ionice"):
+        prefix.extend(["ionice", "-c", "3"])
+    return prefix
 
 
 def _probe_duration(path: Path) -> float | None:
