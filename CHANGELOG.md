@@ -22,6 +22,12 @@ All notable changes to this bot are documented here.
   API ID/Hash flow) — none of the new Instagram username/password/proxy/TOTP/
   signup prompts, or an interactive login/signup waiting on a verification
   code. `/cancel` now recognizes all of them from one shared list.
+- **🔐 Login now didn't ask for a 2FA/verification code.** Instagram can send
+  an emailed/texted code (not just resolve a checkpoint) during login — that
+  path only raised a static "set INSTAGRAM_TOTP_SECRET" error instead of
+  prompting interactively like the checkpoint-challenge path already did.
+  Now both are resolved the same way: the bot asks for the code in chat and
+  retries the login with it.
 
 ## 1.8.13 — 2026-09-21
 

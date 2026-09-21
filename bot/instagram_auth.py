@@ -227,9 +227,9 @@ def _totp_code() -> str:
 
 
 def _perform_login(cl, username: str, password: str, *, code_provider: CodeProvider | None) -> None:
-    """Log `cl` in. With code_provider set, a checkpoint challenge is resolved
-    interactively (the provider is asked for the code Instagram just sent)
-    instead of immediately failing."""
+    """Log `cl` in. With code_provider set, a 2FA/verification code or a
+    checkpoint challenge is resolved interactively (the provider is asked for
+    the code Instagram just sent) instead of immediately failing."""
     from instagrapi.exceptions import (
         BadPassword,
         ChallengeRequired,
@@ -244,12 +244,25 @@ def _perform_login(cl, username: str, password: str, *, code_provider: CodeProvi
     try:
         cl.login(username, password, verification_code=verification_code)
     except TwoFactorRequired as exc:
-        raise RuntimeError(
-            "Instagram requires a 2FA code. Set INSTAGRAM_TOTP_SECRET in .env "
-            "to the authenticator-app seed from Instagram's 2FA setup (Settings "
-            "→ Two-factor authentication → Authentication app) for fully "
-            "automated login — SMS-based 2FA can't be automated this way."
-        ) from exc
+        # No TOTP configured (or Instagram wants an emailed/SMS code instead of
+        # an authenticator-app one) — ask the code_provider interactively when
+        # we have one, otherwise this can't proceed automatically.
+        if code_provider is None:
+            raise RuntimeError(
+                "Instagram requires a verification code (emailed, texted, or "
+                "from an authenticator app). Set INSTAGRAM_TOTP_SECRET for "
+                "automated authenticator-app 2FA, or use /admin → Instagram → "
+                "🔐 Login now to enter an emailed/SMS code interactively."
+            ) from exc
+        code = (code_provider(username, "email/SMS/authenticator") or "").strip()
+        if not code:
+            raise RuntimeError("No verification code was provided — login cancelled.") from exc
+        try:
+            cl.login(username, password, verification_code=code)
+        except Exception as retry_exc:
+            raise RuntimeError(
+                f"Instagram rejected that verification code: {retry_exc}"
+            ) from retry_exc
     except ChallengeRequired as exc:
         if code_provider is None:
             raise RuntimeError(
