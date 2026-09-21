@@ -2,6 +2,20 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.20 — 2026-09-21
+
+### Changed
+- **Randomized device fingerprint per account.** `instagrapi`'s bundled
+  default device profile (a Pixel 8 Pro on one exact Android build) is
+  shared by every user of the library who doesn't override it — a
+  distinctive, mass-produced signature that's an easy pattern for
+  Instagram's fraud detection to key on, independent of anything else about
+  a request. Now picks from a small pool of realistic device profiles,
+  deterministically per account (same account keeps the same device across
+  restarts — consistency matters for trust — but different accounts no
+  longer share an identical fingerprint). Applies to new logins/signups
+  only; an account with an existing saved session keeps its device.
+
 ## 1.8.19 — 2026-09-21
 
 ### Fixed

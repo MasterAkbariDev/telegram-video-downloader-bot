@@ -187,7 +187,56 @@ def _safe_err(exc: BaseException) -> str:
     return text[:400]
 
 
-def _build_client():
+# instagrapi's bundled default device profile (Pixel 8 Pro, one exact
+# Android build) is shared by every user of the library who doesn't
+# override it — a distinctive, mass-produced fingerprint that's an easy
+# pattern for Instagram's fraud detection to key on, independent of
+# anything else about a request. A small pool of realistic, varied
+# profiles avoids handing every login the identical signature.
+_DEVICE_PROFILES: list[dict] = [
+    {
+        "android_version": 34, "android_release": "14", "dpi": "420dpi",
+        "resolution": "1080x2400", "manufacturer": "samsung", "device": "dm3q",
+        "model": "SM-S911B", "cpu": "exynos2200",
+    },
+    {
+        "android_version": 33, "android_release": "13", "dpi": "440dpi",
+        "resolution": "1080x2412", "manufacturer": "OnePlus", "device": "OP5929L1",
+        "model": "CPH2449", "cpu": "kalama",
+    },
+    {
+        "android_version": 34, "android_release": "14", "dpi": "420dpi",
+        "resolution": "1220x2712", "manufacturer": "Google/google", "device": "shiba",
+        "model": "Pixel 8", "cpu": "shiba",
+    },
+    {
+        "android_version": 33, "android_release": "13", "dpi": "480dpi",
+        "resolution": "1440x3200", "manufacturer": "Xiaomi", "device": "dagu",
+        "model": "23127PN0CG", "cpu": "kalama",
+    },
+    {
+        "android_version": 34, "android_release": "14", "dpi": "420dpi",
+        "resolution": "1080x2340", "manufacturer": "samsung", "device": "e1q",
+        "model": "SM-S921B", "cpu": "s5e9945",
+    },
+    {
+        "android_version": 32, "android_release": "12", "dpi": "420dpi",
+        "resolution": "1080x2400", "manufacturer": "motorola", "device": "devon",
+        "model": "moto g100", "cpu": "kona",
+    },
+]
+
+
+def _pick_device_profile(seed: str) -> dict:
+    """Deterministic per-account choice — the same account always gets the
+    same profile across restarts (consistency matters for trust), but
+    different accounts get different ones (no shared fingerprint)."""
+    import random
+
+    return dict(random.Random(seed).choice(_DEVICE_PROFILES))
+
+
+def _build_client(seed: str | None = None):
     try:
         from instagrapi import Client
     except ImportError as exc:
@@ -208,6 +257,8 @@ def _build_client():
             logger.warning(
                 "Could not load saved Instagram session (%s) — starting fresh", exc
             )
+    elif seed:
+        cl.set_device(_pick_device_profile(seed))
 
     proxy = cfg.INSTAGRAM_PROXY or cfg.YTDLP_PROXY
     if proxy:
@@ -419,7 +470,7 @@ def _login_and_save(path: Path) -> None:
         raise RuntimeError("INSTAGRAM_USERNAME / INSTAGRAM_PASSWORD not set")
 
     logger.info("Instagram auto-login as %s…", username)
-    cl = _build_client()
+    cl = _build_client(seed=username)
     _perform_login(cl, username, password, code_provider=None)
     _save_session_and_cookies(cl, path)
 
@@ -439,7 +490,7 @@ def interactive_login(code_provider: CodeProvider) -> dict:
     global _last_login_failure_at
     with _LOGIN_LOCK:
         logger.info("Instagram interactive login as %s…", username)
-        cl = _build_client()
+        cl = _build_client(seed=username)
         try:
             _perform_login(cl, username, password, code_provider=code_provider)
             _save_session_and_cookies(cl, INSTAGRAM_COOKIES_PATH)
@@ -484,7 +535,7 @@ def create_instagram_account(
     guaranteed: Instagram may still require a phone number or a captcha that
     this flow cannot solve, especially from a datacenter IP.
     """
-    cl = _build_client()
+    cl = _build_client(seed=username)
     cl.challenge_code_handler = code_provider
     user = cl.signup_caa_email(username, password, email, full_name=full_name, attempts=6, wait_seconds=20)
     _save_session_and_cookies(cl, INSTAGRAM_COOKIES_PATH)
