@@ -365,7 +365,10 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
             return
         raise RuntimeError("Instagram rejected that verification code.")
 
-    markers = cl._caa_result_action_markers(result)
+    # _caa_result_action_markers expects the *wrapped* {"result": ...} shape
+    # that bloks_caa_login() returns, not the raw bloks_caa_login_send_request()
+    # payload we have here — passing it unwrapped silently yields [] every time.
+    markers = cl._caa_result_action_markers({"result": result})
     if any("YOUTH_REGULATION" in marker for marker in markers):
         _resolve_youth_regulation_checkpoint(cl, username, password, result, code_provider)
         return

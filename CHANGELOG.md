@@ -2,7 +2,18 @@
 
 All notable changes to this bot are documented here.
 
-## 1.8.20 — 2026-09-21
+## 1.8.21 — 2026-09-21
+
+### Fixed
+- **The age-checkpoint handler from 1.8.18 never actually triggered.**
+  `instagrapi`'s `_caa_result_action_markers()` expects the *wrapped*
+  `{"result": ...}` shape `bloks_caa_login()` returns, not the raw
+  `bloks_caa_login_send_request()` payload used directly — passing it
+  unwrapped silently returned `[]` every time, regardless of what Instagram
+  actually sent. Confirmed from production logs: the same
+  `BloksCAARegUnderAgeBlockingController` checkpoint was present both times
+  reported as "unrecognized reason" — detection was the bug, not Instagram's
+  response. Fixed by wrapping the result before extracting markers.
 
 ### Changed
 - **Randomized device fingerprint per account.** `instagrapi`'s bundled
