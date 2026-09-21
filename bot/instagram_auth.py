@@ -363,6 +363,20 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
         two_step = cl.bloks_caa_resolve_two_step_verification(result, verification_code=code)
         if two_step.get("logged_in"):
             return
+        reason = two_step.get("reason") or ""
+        logger.warning(
+            "Two-step verification for %s did not complete. reason=%r two_step=%s",
+            username, reason, json.dumps(two_step, default=str)[:4000],
+        )
+        if reason and "code" not in reason.lower():
+            # Failed before the code was ever submitted (e.g. a missing
+            # context_data at an earlier sub-step) — the code itself was
+            # never actually tested, so don't blame it.
+            raise RuntimeError(
+                f"Instagram's verification flow didn't reach the code-submission "
+                f"step ({reason}) — this isn't about whether the code was right. "
+                f"Check server logs for the raw response."
+            )
         raise RuntimeError("Instagram rejected that verification code.")
 
     # _caa_result_action_markers expects the *wrapped* {"result": ...} shape
@@ -593,6 +607,16 @@ def create_instagram_account(
     cl = _build_client(seed=username)
     cl.challenge_code_handler = code_provider
     user = cl.signup_caa_email(username, password, email, full_name=full_name, attempts=6, wait_seconds=20)
+
+    # signup_caa_email() only extracts the created user's metadata — it never
+    # calls the same session-establishing step a login does, so cl.private
+    # has no sessionid yet even though the account now exists. Log in right
+    # away with the credentials we just created, reusing this same client
+    # (it already carries the warmed-up device/Bloks state from signup). A
+    # brand-new account should already have its age-verification flag set
+    # from creation, so this is expected to clear without hitting the same
+    # checkpoint an existing, never-verified-on-this-device account does.
+    _perform_login_interactive(cl, user.username, password, code_provider)
     _save_session_and_cookies(cl, INSTAGRAM_COOKIES_PATH)
     return {"username": user.username, "user_id": str(user.pk)}
 

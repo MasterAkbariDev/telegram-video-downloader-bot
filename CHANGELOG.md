@@ -2,6 +2,27 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.23 — 2026-09-21
+
+### Added
+- **Signup now actually establishes a session.** `instagrapi`'s
+  `signup_caa_email()` only extracts the newly-created user's metadata — it
+  never calls the same session-establishing step a login does, so account
+  creation succeeded but produced no usable cookies. `create_instagram_account()`
+  now logs in immediately with the just-created credentials, reusing the same
+  already-warmed client from signup.
+
+### Fixed
+- **Two-step verification blamed the code for failures that happened before
+  the code was ever submitted.** `bloks_caa_resolve_two_step_verification()`
+  walks three sub-steps (entrypoint → code entry → submit) and returns a
+  `reason` describing exactly which one failed — e.g. `"missing code_entry
+  context_data"` when it never got far enough to submit anything. This was
+  being discarded, and any non-`logged_in` result was reported as "Instagram
+  rejected that verification code" regardless of whether a code was even
+  tried. Now surfaces the real reason and only blames the code when the
+  failure actually happened at that step.
+
 ## 1.8.22 — 2026-09-21
 
 ### Fixed
