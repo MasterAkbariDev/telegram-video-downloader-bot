@@ -399,21 +399,51 @@ def _bloks_best_effort_reason(result: dict) -> str:
     return ""
 
 
+_BIRTHDAY_FORMATS = (
+    "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%d %m %Y",
+    "%Y-%m-%d", "%Y/%m/%d",
+    "%m-%d-%Y", "%m/%d/%Y",
+)
+
+
+def _parse_birthday(text: str) -> str:
+    """Normalize whatever date format the admin typed to DD-MM-YYYY, the
+    format this endpoint was captured sending. Raises ValueError if the
+    text can't be parsed as a date at all."""
+    import datetime
+
+    text = text.strip()
+    for fmt in _BIRTHDAY_FORMATS:
+        try:
+            parsed = datetime.datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        return parsed.strftime("%d-%m-%Y")
+    raise ValueError(f"Could not parse {text!r} as a date")
+
+
 def _resolve_youth_regulation_checkpoint(cl, username: str, password: str, result: dict, code_provider: CodeProvider) -> None:
     """Meta's age/"youth regulation" check on a first-time device. Ask the
     account holder to confirm their own birthdate live, in chat — never
     supplied or guessed by this code — then submit exactly what they say and
     retry the login once."""
-    birthday = (
+    raw_birthday = (
         code_provider(
             username,
-            "your account's birthdate (DD-MM-YYYY) — Instagram is asking you to "
-            "confirm it before this login can continue",
+            "your account's birthdate — Instagram is asking you to confirm it "
+            "before this login can continue. Any common format is fine, e.g. "
+            "27-09-2003 or 27/09/2003.",
         )
         or ""
     ).strip()
-    if not birthday:
+    if not raw_birthday:
         raise RuntimeError("No birthdate was provided — login cancelled.")
+    try:
+        birthday = _parse_birthday(raw_birthday)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Couldn't read {raw_birthday!r} as a date — try again with e.g. 27-09-2003."
+        ) from exc
 
     extracted = cl._caa_extract_state(result)
     state = {
@@ -444,12 +474,34 @@ def _resolve_youth_regulation_checkpoint(cl, username: str, password: str, resul
     if cl.bloks_apply_login_response(response):
         return
 
+    response_markers = cl._caa_result_action_markers({"result": response})
+    logger.warning(
+        "Birthday submission for %s did not return a session. markers=%s raw=%s",
+        username, response_markers, json.dumps(response, default=str)[:4000],
+    )
+    if any("YOUTH_REGULATION" in marker for marker in response_markers):
+        # Flow isn't done — e.g. a youth-ToS acknowledgement screen may follow
+        # the birthday step. We don't yet handle further sub-steps here.
+        raise RuntimeError(
+            "Instagram's age-confirmation flow has another step after the "
+            "birthdate that this bot doesn't handle yet (see server logs "
+            "for the raw response — markers: " + str(response_markers) + ")."
+        )
+
     # Birthday accepted but the flow didn't hand back a session directly —
     # retry the login request now that the checkpoint should be cleared.
     retry = cl.bloks_caa_login_send_request(password, username=username, auto_prepare=False, try_num=2)
     if cl.bloks_apply_login_response(retry):
         return
-    raise RuntimeError("Instagram still didn't complete login after confirming the birthdate.")
+    retry_markers = cl._caa_result_action_markers({"result": retry})
+    logger.warning(
+        "Retry after birthday submission for %s still failed. markers=%s raw=%s",
+        username, retry_markers, json.dumps(retry, default=str)[:4000],
+    )
+    raise RuntimeError(
+        "Instagram still didn't complete login after confirming the birthdate "
+        f"(retry markers: {retry_markers}). Check server logs for the raw response."
+    )
 
 
 def _save_session_and_cookies(cl, path: Path) -> None:

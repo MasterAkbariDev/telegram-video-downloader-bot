@@ -2,7 +2,21 @@
 
 All notable changes to this bot are documented here.
 
-## 1.8.21 — 2026-09-21
+## 1.8.22 — 2026-09-21
+
+### Fixed
+- Birthdate confirmation reached the API and got `200`, but login still
+  didn't complete on retry. Two gaps closed:
+  - The prompt asked for `DD-MM-YYYY` but accepted whatever was typed
+    verbatim — a reply like `27/09/2003` (slashes) may have been silently
+    mis-parsed by Instagram's field. Now parses several common formats
+    (`DD-MM-YYYY`, `DD/MM/YYYY`, `YYYY-MM-DD`, `MM/DD/YYYY`, ...) and
+    normalizes to the one this endpoint was captured accepting.
+  - The birthday-submission response and the login retry that follows it
+    weren't inspected on failure — just a generic "still didn't complete"
+    message. Both are now logged server-side (markers + raw response) so a
+    repeat failure is diagnosable from one log pull instead of another
+    live round-trip.
 
 ### Fixed
 - **The age-checkpoint handler from 1.8.18 never actually triggered.**
