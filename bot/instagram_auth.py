@@ -25,15 +25,13 @@ from http.cookiejar import MozillaCookieJar, Cookie
 from pathlib import Path
 from typing import Callable
 
-from bot.config import (
-    DATA_DIR,
-    INSTAGRAM_PASSWORD,
-    INSTAGRAM_PROXY,
-    INSTAGRAM_TOTP_SECRET,
-    INSTAGRAM_USERNAME,
-    YTDLP_PROXY,
-    get_cookies_file,
-)
+from bot import config as cfg
+from bot.config import DATA_DIR, get_cookies_file
+
+# INSTAGRAM_USERNAME/PASSWORD/PROXY/TOTP_SECRET are read as cfg.X (not
+# imported by name) everywhere below — the admin panel can change them at
+# runtime via reload_settings(), and `from bot.config import X` would freeze
+# a stale copy in this module's namespace that never sees those updates.
 
 # (username, choice) -> verification code. `choice` is instagrapi's
 # CHOICE_EMAIL/CHOICE_SMS constant. Used to relay a code request out to
@@ -51,7 +49,7 @@ _last_login_failure_at = 0.0
 
 
 def instagram_credentials_configured() -> bool:
-    return bool(INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD)
+    return bool(cfg.INSTAGRAM_USERNAME and cfg.INSTAGRAM_PASSWORD)
 
 
 def ensure_instagram_cookies(*, force_refresh: bool = False) -> str | None:
@@ -122,9 +120,9 @@ def instagram_cookies_status() -> dict:
         "age_days": age_days,
         "auto_login_configured": instagram_credentials_configured(),
         "session_saved": INSTAGRAM_SESSION_PATH.is_file(),
-        "username": INSTAGRAM_USERNAME,
-        "proxy_configured": bool(INSTAGRAM_PROXY or YTDLP_PROXY),
-        "totp_configured": bool(INSTAGRAM_TOTP_SECRET),
+        "username": cfg.INSTAGRAM_USERNAME,
+        "proxy_configured": bool(cfg.INSTAGRAM_PROXY or cfg.YTDLP_PROXY),
+        "totp_configured": bool(cfg.INSTAGRAM_TOTP_SECRET),
         "cooldown_remaining_sec": max(
             0.0, _LOGIN_FAILURE_COOLDOWN_SEC - (time.time() - _last_login_failure_at)
         )
@@ -182,8 +180,9 @@ def _cookies_look_valid(path: Path) -> bool:
 def _safe_err(exc: BaseException) -> str:
     """Never echo password material from exception text."""
     text = str(exc)
-    if INSTAGRAM_PASSWORD and INSTAGRAM_PASSWORD in text:
-        text = text.replace(INSTAGRAM_PASSWORD, "***")
+    password = cfg.INSTAGRAM_PASSWORD
+    if password and password in text:
+        text = text.replace(password, "***")
     return text[:400]
 
 
@@ -209,14 +208,14 @@ def _build_client():
                 "Could not load saved Instagram session (%s) — starting fresh", exc
             )
 
-    proxy = INSTAGRAM_PROXY or YTDLP_PROXY
+    proxy = cfg.INSTAGRAM_PROXY or cfg.YTDLP_PROXY
     if proxy:
         cl.set_proxy(proxy)
     return cl
 
 
 def _totp_code() -> str:
-    if not INSTAGRAM_TOTP_SECRET:
+    if not cfg.INSTAGRAM_TOTP_SECRET:
         return ""
     try:
         import pyotp
@@ -224,7 +223,7 @@ def _totp_code() -> str:
         raise RuntimeError(
             "pyotp is required for INSTAGRAM_TOTP_SECRET (pip install pyotp)"
         ) from exc
-    return pyotp.TOTP(INSTAGRAM_TOTP_SECRET).now()
+    return pyotp.TOTP(cfg.INSTAGRAM_TOTP_SECRET).now()
 
 
 def _perform_login(cl, username: str, password: str, *, code_provider: CodeProvider | None) -> None:
@@ -300,8 +299,8 @@ def _save_session_and_cookies(cl, path: Path) -> None:
 def _login_and_save(path: Path) -> None:
     """Non-interactive login used by the passive ensure_instagram_cookies() path
     (triggered by ordinary download requests) — must never block on a human."""
-    username = INSTAGRAM_USERNAME or ""
-    password = INSTAGRAM_PASSWORD or ""
+    username = cfg.INSTAGRAM_USERNAME or ""
+    password = cfg.INSTAGRAM_PASSWORD or ""
     if not username or not password:
         raise RuntimeError("INSTAGRAM_USERNAME / INSTAGRAM_PASSWORD not set")
 
@@ -318,8 +317,8 @@ def interactive_login(code_provider: CodeProvider) -> dict:
     code_provider(username, choice) for the code Instagram just sent —
     typically wired up to prompt the admin over Telegram and wait for a reply.
     """
-    username = INSTAGRAM_USERNAME or ""
-    password = INSTAGRAM_PASSWORD or ""
+    username = cfg.INSTAGRAM_USERNAME or ""
+    password = cfg.INSTAGRAM_PASSWORD or ""
     if not username or not password:
         raise RuntimeError("INSTAGRAM_USERNAME / INSTAGRAM_PASSWORD not set")
 

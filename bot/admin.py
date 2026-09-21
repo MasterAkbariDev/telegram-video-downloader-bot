@@ -10,15 +10,10 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
+from bot import config as cfg
 from bot import env_store, media_cache, stats
 from bot.changelog import format_changelog_for_telegram
-from bot.config import (
-    TELEGRAM_API_HASH,
-    TELEGRAM_API_ID,
-    is_admin,
-    large_upload_enabled,
-    reload_settings,
-)
+from bot.config import is_admin, large_upload_enabled, reload_settings
 from bot.messages import esc, format_size
 from bot.speedtest import run_speed_test
 from bot.update_check import (
@@ -43,6 +38,23 @@ AWAIT_IG_SIGNUP_PASSWORD = "admin_await_ig_signup_password"
 AWAIT_IG_SIGNUP_EMAIL = "admin_await_ig_signup_email"
 AWAIT_IG_SIGNUP_FULLNAME = "admin_await_ig_signup_fullname"
 IG_SIGNUP_DATA = "admin_ig_signup_data"
+
+# Every "waiting for a text/document reply" flag — keep this in sync when
+# adding a new one, since /cancel and cancel_admin_input rely on it to know
+# whether there's anything to cancel.
+_ALL_AWAIT_KEYS = (
+    AWAIT_API_ID,
+    AWAIT_API_HASH,
+    AWAIT_IG_COOKIES,
+    AWAIT_IG_USERNAME,
+    AWAIT_IG_PASSWORD,
+    AWAIT_IG_PROXY,
+    AWAIT_IG_TOTP,
+    AWAIT_IG_SIGNUP_USERNAME,
+    AWAIT_IG_SIGNUP_PASSWORD,
+    AWAIT_IG_SIGNUP_EMAIL,
+    AWAIT_IG_SIGNUP_FULLNAME,
+)
 
 MY_TELEGRAM_ORG = "https://my.telegram.org/apps"
 
@@ -162,6 +174,10 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         else:
             await update.message.reply_text("⛔ Admin access only.")
         return
+    # Pick up any .env edits made outside the bot (SSH/manual edit) without
+    # requiring a restart — otherwise the panel can show stale state, e.g.
+    # "Login now" missing after adding INSTAGRAM_USERNAME/PASSWORD by hand.
+    reload_settings()
     await update.message.reply_text(
         _panel_header(),
         parse_mode=ParseMode.HTML,
@@ -211,6 +227,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     data = query.data or ""
+
+    # Pick up any .env edits made outside the bot before rendering anything.
+    if data != "admin:close":
+        reload_settings()
 
     if data == "admin:close":
         await query.message.delete()
@@ -890,20 +910,19 @@ async def admin_document_input(update: Update, context: ContextTypes.DEFAULT_TYP
     return True
 
 
+def has_pending_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """True if /cancel would actually have something to do for this admin."""
+    if any(context.user_data.get(key) for key in _ALL_AWAIT_KEYS):
+        return True
+    user = update.effective_user
+    return bool(user and user.id in _pending_ig_code_queues)
+
+
 async def cancel_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _require_admin_dm(update):
         return
-    context.user_data.pop(AWAIT_API_ID, None)
-    context.user_data.pop(AWAIT_API_HASH, None)
-    context.user_data.pop(AWAIT_IG_COOKIES, None)
-    context.user_data.pop(AWAIT_IG_USERNAME, None)
-    context.user_data.pop(AWAIT_IG_PASSWORD, None)
-    context.user_data.pop(AWAIT_IG_PROXY, None)
-    context.user_data.pop(AWAIT_IG_TOTP, None)
-    context.user_data.pop(AWAIT_IG_SIGNUP_USERNAME, None)
-    context.user_data.pop(AWAIT_IG_SIGNUP_PASSWORD, None)
-    context.user_data.pop(AWAIT_IG_SIGNUP_EMAIL, None)
-    context.user_data.pop(AWAIT_IG_SIGNUP_FULLNAME, None)
+    for key in _ALL_AWAIT_KEYS:
+        context.user_data.pop(key, None)
     context.user_data.pop(IG_SIGNUP_DATA, None)
 
     user = update.effective_user
@@ -1075,8 +1094,8 @@ def _api_text() -> str:
         f'<a href="{MY_TELEGRAM_ORG}">my.telegram.org</a>, the bot uses '
         "<b>Telegram MTProto</b> to upload files up to <b>2 GB</b>.\n\n"
         f"<b>Status:</b> {_api_status_line()}\n\n"
-        f"API ID: <code>{esc(TELEGRAM_API_ID) if TELEGRAM_API_ID else '— not set —'}</code>\n"
-        f"API Hash: <code>{env_store.mask_secret(TELEGRAM_API_HASH) if TELEGRAM_API_HASH else '— not set —'}</code>\n\n"
+        f"API ID: <code>{esc(cfg.TELEGRAM_API_ID) if cfg.TELEGRAM_API_ID else '— not set —'}</code>\n"
+        f"API Hash: <code>{env_store.mask_secret(cfg.TELEGRAM_API_HASH) if cfg.TELEGRAM_API_HASH else '— not set —'}</code>\n\n"
         "<i>Both values are required. Get them from my.telegram.org → "
         "API development tools → Create application.</i>"
     )
@@ -1085,7 +1104,7 @@ def _api_text() -> str:
 def _api_status_line() -> str:
     if large_upload_enabled():
         return "✅ Configured — uploads up to <b>2 GB</b>"
-    if TELEGRAM_API_ID or TELEGRAM_API_HASH:
+    if cfg.TELEGRAM_API_ID or cfg.TELEGRAM_API_HASH:
         return "⚠️ Incomplete — set both API ID and API Hash"
     return "❌ Not configured — max upload <b>50 MB</b>"
 

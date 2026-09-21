@@ -2,6 +2,27 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.14 — 2026-09-21
+
+### Fixed
+- **Admin panel showed stale Instagram/API status after saving.** Several
+  modules (`bot/instagram_auth.py`, `bot/admin.py`) imported mutable config
+  values (`INSTAGRAM_USERNAME`, `INSTAGRAM_PASSWORD`, `INSTAGRAM_PROXY`,
+  `INSTAGRAM_TOTP_SECRET`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`) with
+  `from bot.config import X`, which freezes a copy at import time — a classic
+  Python gotcha. Saving new credentials via the admin panel (or editing
+  `.env` directly) updated `bot.config`'s copy but never reached these
+  frozen copies, so e.g. **🔐 Login now stayed hidden after setting
+  username/password** until a full bot restart. Fixed by reading these
+  live off the `bot.config` module everywhere instead. Also added a
+  `reload_settings()` call whenever the admin panel is opened, so `.env`
+  edits made outside the bot (SSH) are picked up without a restart.
+- **`/cancel` said "Nothing in progress" even with a prompt pending.** It
+  only recognized 2 of the 11 "waiting for a reply" states (only the 2 GB
+  API ID/Hash flow) — none of the new Instagram username/password/proxy/TOTP/
+  signup prompts, or an interactive login/signup waiting on a verification
+  code. `/cancel` now recognizes all of them from one shared list.
+
 ## 1.8.13 — 2026-09-21
 
 ### Fixed

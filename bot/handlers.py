@@ -83,12 +83,12 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Cancel admin credential input, a quality picker, or an active download/upload."""
-    from bot.admin import AWAIT_API_HASH, AWAIT_API_ID, _require_admin_dm, cancel_admin_input
+    from bot.admin import _require_admin_dm, cancel_admin_input, has_pending_admin_input
 
     if (
         update.effective_user
         and _require_admin_dm(update)
-        and (context.user_data.get(AWAIT_API_ID) or context.user_data.get(AWAIT_API_HASH))
+        and has_pending_admin_input(update, context)
     ):
         await cancel_admin_input(update, context)
         return
