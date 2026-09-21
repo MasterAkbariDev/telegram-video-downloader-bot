@@ -420,6 +420,25 @@ def resolve_media(
         except Exception as fb_exc:
             _cleanup_job_dir(fallback_dir)
             logger.warning("Fallback failed for %s: %s", url, fb_exc)
+
+            # Last resort for login-walled Instagram posts: a paid managed
+            # API (runs its own residential-proxy + account pool), tried only
+            # after every free path has failed.
+            if _is_instagram_url(url) and not force_audio:
+                from bot.hikerapi import hikerapi_configured, resolve_via_hikerapi
+
+                if hikerapi_configured():
+                    try:
+                        hiker_result = resolve_via_hikerapi(
+                            url,
+                            progress_callback=progress_callback,
+                            cancel_check=cancel_check,
+                        )
+                        if hiker_result:
+                            return hiker_result
+                    except Exception as hiker_exc:
+                        logger.warning("HikerAPI fallback failed for %s: %s", url, hiker_exc)
+
             if is_youtube_bot_check(exc):
                 logger.warning(
                     "YouTube bot-check (cookies=%s) for %s",
@@ -1230,25 +1249,36 @@ def is_instagram_login_required(exc: BaseException | str) -> bool:
 
 
 def instagram_login_hint() -> str:
+    from bot.hikerapi import hikerapi_configured
     from bot.instagram_auth import instagram_credentials_configured
+
+    if hikerapi_configured():
+        return (
+            "Instagram blocked this post via every free method, and the "
+            "HikerAPI fallback couldn't resolve it either (may be private, "
+            "deleted, or a transient HikerAPI error). Try again shortly."
+        )
 
     cookies = get_cookies_file()
     if instagram_credentials_configured():
         return (
             "Instagram auto-login hit a security checkpoint/2FA. "
             "Open Instagram in a browser (same network), approve the login, "
-            "then retry — or export cookies to <code>data/cookies.txt</code>."
+            "then retry — or export cookies to <code>data/cookies.txt</code>. "
+            "Setting HIKERAPI_KEY in .env avoids this entirely (see README)."
         )
     if cookies:
         return (
             "Instagram blocked anonymous access for this post (login wall). "
             f"Refresh Instagram cookies in {cookies} from a logged-in browser, "
-            "then try again."
+            "then try again. Setting HIKERAPI_KEY in .env avoids this "
+            "entirely (see README)."
         )
     return (
         "Instagram blocked anonymous access for this post. "
         "Set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD in .env for auto-login, "
-        "or export cookies to <code>data/cookies.txt</code>."
+        "export cookies to <code>data/cookies.txt</code>, or set HIKERAPI_KEY "
+        "for a managed API fallback (see README)."
     )
 
 

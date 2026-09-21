@@ -58,6 +58,11 @@ INSTAGRAM_PROXY = os.getenv("INSTAGRAM_PROXY", "").strip() or None
 # Authenticator-app TOTP seed — enables fully automated 2FA login via pyotp.
 # (Settings → Two-factor authentication → Authentication app, on the IG account)
 INSTAGRAM_TOTP_SECRET = os.getenv("INSTAGRAM_TOTP_SECRET", "").strip() or None
+# Optional HikerAPI key (hikerapi.com) — a paid, managed Instagram data API
+# (runs its own residential-proxy + account pool server-side). Used only as
+# a last-resort fallback when free extraction (yt-dlp + anonymous scraping)
+# fails, e.g. for login-walled posts — never on the normal/public-post path.
+HIKERAPI_KEY = os.getenv("HIKERAPI_KEY", "").strip() or None
 
 STANDARD_UPLOAD_LIMIT = 50 * 1024 * 1024
 LARGE_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024
@@ -84,7 +89,7 @@ def reload_settings() -> None:
     """Reload .env — call after admin updates credentials."""
     global BOT_TOKEN, TELEGRAM_PROXY, TELEGRAM_API_ID, TELEGRAM_API_HASH, ADMIN_IDS, QUALITY, MAX_VIDEO_HEIGHT
     global COOKIES_FILE, YTDLP_PROXY, INSTAGRAM_MIN_INTERVAL, COMPRESS_TARGET_MB
-    global INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD, INSTAGRAM_PROXY, INSTAGRAM_TOTP_SECRET
+    global INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD, INSTAGRAM_PROXY, INSTAGRAM_TOTP_SECRET, HIKERAPI_KEY
 
     load_dotenv(ROOT_DIR / ".env", override=True)
     BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -102,6 +107,7 @@ def reload_settings() -> None:
     INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "").strip() or None
     INSTAGRAM_PROXY = os.getenv("INSTAGRAM_PROXY", "").strip() or None
     INSTAGRAM_TOTP_SECRET = os.getenv("INSTAGRAM_TOTP_SECRET", "").strip() or None
+    HIKERAPI_KEY = os.getenv("HIKERAPI_KEY", "").strip() or None
 
 
 def cookies_file_looks_valid(path: Path) -> bool:

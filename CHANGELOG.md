@@ -2,6 +2,22 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.17 — 2026-09-21
+
+### Added
+- **`HIKERAPI_KEY` — managed-API fallback for login-walled Instagram posts.**
+  Self-hosted Instagram auto-login runs one account from one server IP,
+  which Instagram's risk system is built to catch regardless of which
+  library drives it — that's what all of today's testing kept confirming.
+  Production Instagram tools solve this by not self-hosting login at all:
+  they call a managed API (in this case [HikerAPI](https://hikerapi.com),
+  built by the `instagrapi` maintainers) that runs its own residential-proxy
+  and account pool server-side. Wired in as a **last resort**, tried only
+  after free extraction (yt-dlp + anonymous scraping) has already failed —
+  normal downloads still cost nothing; a login-walled post costs about
+  $0.0006. Scales to any number of users without touching a shared cookie
+  per request. 100 free requests to try it, no card required — see README.
+
 ## 1.8.16 — 2026-09-21
 
 ### Fixed

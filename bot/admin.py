@@ -1066,10 +1066,19 @@ def _ig_cookies_text() -> str:
     else:
         auto_login = "❌ not configured"
 
+    from bot.hikerapi import hikerapi_configured
+
+    hiker_line = (
+        "✅ configured — used as a last resort for login-walled posts"
+        if hikerapi_configured()
+        else "❌ not set — recommended over auto-login for reliability at scale, see README"
+    )
+
     return (
         "📸 <b>Instagram</b>\n\n"
         f"<b>Cookies:</b> {state}\n"
-        f"<b>Auto-login:</b> {auto_login}\n\n"
+        f"<b>Auto-login:</b> {auto_login}\n"
+        f"<b>HikerAPI (HIKERAPI_KEY):</b> {hiker_line}\n\n"
         "Auto-login uses Instagram's mobile app login flow with a persisted "
         "device fingerprint, and supports automated 2FA via TOTP. It works "
         "best — and is far less likely to be rejected — with a <b>proxy</b> "

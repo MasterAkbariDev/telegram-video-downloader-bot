@@ -132,7 +132,28 @@ sudo systemctl restart telegram-bot
 YouTube often blocks datacenter IPs. Instagram increasingly requires a
 **logged-in session** for reels/posts.
 
-**Option A — Instagram auto-login (fully automated)**
+**Recommended for reliability at any scale — a managed API (HikerAPI)**
+
+Self-hosting Instagram login (Option A below) means running one account
+from one server IP, which is exactly what Instagram's risk system is built
+to catch — that's true of any library, not something specific to this bot.
+The way most production Instagram tools handle login-walled content
+reliably is by **not** running their own login at all: they call a managed
+API that maintains its own residential-proxy and account pool server-side.
+
+```env
+HIKERAPI_KEY=your_hikerapi_key
+```
+
+Sign up at [hikerapi.com](https://hikerapi.com) (100 free requests, no card
+required) and set the key — no other setup needed. It's used **only as a
+last resort**, after free extraction (yt-dlp + anonymous scraping, which
+already handles the large majority of public posts) has failed, so normal
+usage costs nothing; a login-walled post costs ~$0.0006 (with usage-based
+volume discounts). This scales to any number of users without touching a
+single shared cookie per request, unlike self-hosted login.
+
+**Option A — Instagram auto-login (fully automated, but fights Instagram's risk system)**
 
 Set in `.env`:
 
