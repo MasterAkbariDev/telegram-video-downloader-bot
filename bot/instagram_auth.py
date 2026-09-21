@@ -318,10 +318,31 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
     if any("YOUTH_REGULATION" in marker for marker in markers):
         _resolve_youth_regulation_checkpoint(cl, username, password, result, code_provider)
         return
+    if any(marker.startswith("CAA_LOGIN_FALLBACK:") for marker in markers):
+        raise RuntimeError(
+            "Instagram routed this login to its legacy fallback path, which "
+            "has been unreliable for this account today (the 'needs_upgrade' "
+            "error from earlier) — likely a rate-limit from repeated attempts "
+            "rather than something resolvable right now. Wait before retrying."
+        )
 
-    raise RuntimeError(
-        f"Instagram declined this login for an unrecognized reason (markers: {markers})."
-    )
+    # Nothing we recognize — log the full response server-side (may contain
+    # session-scoped tokens, so it's not echoed to the admin) and surface a
+    # best-effort human-readable reason if the response has one.
+    logger.warning("Unrecognized CAA login result for %s: %s", username, json.dumps(result, default=str)[:4000])
+    reason = _bloks_best_effort_reason(result)
+    detail = f" ({reason})" if reason else f" (markers: {markers})" if markers else ""
+    raise RuntimeError(f"Instagram declined this login for an unrecognized reason{detail}. Check server logs for the raw response.")
+
+
+def _bloks_best_effort_reason(result: dict) -> str:
+    """Best-effort human-readable snippet from a Bloks result, for the parts
+    of it that aren't a known action/marker — e.g. a plain title/message."""
+    for key in ("title", "message", "reason", "error_type"):
+        value = result.get(key) if isinstance(result, dict) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:200]
+    return ""
 
 
 def _resolve_youth_regulation_checkpoint(cl, username: str, password: str, result: dict, code_provider: CodeProvider) -> None:

@@ -2,6 +2,15 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.19 — 2026-09-21
+
+### Fixed
+- Interactive login's "unrecognized reason" failure gave no detail to act
+  on. Now logs the full raw CAA response server-side (not echoed to the
+  admin, since it can carry session-scoped tokens) and surfaces a
+  best-effort human-readable reason when the response has one, instead of
+  just an empty marker list.
+
 ## 1.8.18 — 2026-09-21
 
 ### Added
