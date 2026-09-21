@@ -17,6 +17,7 @@ system, not necessarily wrong credentials. See INSTAGRAM_PROXY below.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -226,34 +227,21 @@ def _totp_code() -> str:
     return pyotp.TOTP(cfg.INSTAGRAM_TOTP_SECRET).now()
 
 
-def _resume_two_factor(cl, code: str, exc) -> bool:
-    """Submit a 2FA/verification code against the SAME Bloks challenge the
-    failed cl.login() call already opened, instead of calling cl.login()
-    again from scratch.
-
-    Why: instagrapi's ClientError spreads the original CAA response onto the
-    raised exception as attributes (see ClientError.__init__), so it's still
-    available here even though the call that produced it already returned.
-    Calling cl.login() a second time re-runs the *entire* device-attestation
-    /Bloks CAA sequence from step 0 in the same process — which has been
-    reported (subzeroid/instagrapi#2807, open as of 2026-09) to make
-    Instagram respond with a misleading "needs_upgrade" / "Your version of
-    Instagram is out of date" rejection specifically for accounts that
-    require a verification code. Resuming the already-opened challenge
-    avoids replaying that sequence a second time.
-    """
-    login_json = dict(vars(exc))
-    resume = getattr(cl, "_login_with_bloks_two_factor", None)
-    if resume is None:
-        # instagrapi changed its internals — fall back to a full relogin.
-        return bool(cl.login(cl.username, cl.password, verification_code=code))
-    return bool(resume(code, login_json, exc))
-
-
 def _perform_login(cl, username: str, password: str, *, code_provider: CodeProvider | None) -> None:
-    """Log `cl` in. With code_provider set, a 2FA/verification code or a
-    checkpoint challenge is resolved interactively (the provider is asked for
-    the code Instagram just sent) instead of immediately failing."""
+    """Log `cl` in. With code_provider set, a 2FA/verification code, a
+    checkpoint challenge, or Meta's age/"youth regulation" confirmation step
+    is resolved interactively — the provider is asked live, and whatever it
+    returns is submitted verbatim. Nothing is guessed or asserted on the
+    account holder's behalf; each of these prompts only proceeds once a real
+    person answers it, the same way tapping through them in the app would."""
+    if code_provider is not None:
+        cl.challenge_code_handler = code_provider
+        _perform_login_interactive(cl, username, password, code_provider)
+        return
+    _perform_login_noninteractive(cl, username, password)
+
+
+def _perform_login_noninteractive(cl, username: str, password: str) -> None:
     from instagrapi.exceptions import (
         BadPassword,
         ChallengeRequired,
@@ -261,51 +249,24 @@ def _perform_login(cl, username: str, password: str, *, code_provider: CodeProvi
         TwoFactorRequired,
     )
 
-    if code_provider is not None:
-        cl.challenge_code_handler = code_provider
-
     verification_code = _totp_code()
     try:
         cl.login(username, password, verification_code=verification_code)
     except TwoFactorRequired as exc:
-        # No TOTP configured (or Instagram wants an emailed/SMS code instead of
-        # an authenticator-app one) — ask the code_provider interactively when
-        # we have one, otherwise this can't proceed automatically.
-        if code_provider is None:
-            raise RuntimeError(
-                "Instagram requires a verification code (emailed, texted, or "
-                "from an authenticator app). Set INSTAGRAM_TOTP_SECRET for "
-                "automated authenticator-app 2FA, or use /admin → Instagram → "
-                "🔐 Login now to enter an emailed/SMS code interactively."
-            ) from exc
-        code = (code_provider(username, "email/SMS/authenticator") or "").strip()
-        if not code:
-            raise RuntimeError("No verification code was provided — login cancelled.") from exc
-        try:
-            resumed = _resume_two_factor(cl, code, exc)
-        except Exception as retry_exc:
-            raise RuntimeError(
-                f"Instagram rejected that verification code: {retry_exc}"
-            ) from retry_exc
-        if not resumed:
-            raise RuntimeError("Instagram did not accept that verification code.") from exc
+        raise RuntimeError(
+            "Instagram requires a verification code (emailed, texted, or "
+            "from an authenticator app). Set INSTAGRAM_TOTP_SECRET for "
+            "automated authenticator-app 2FA, or use /admin → Instagram → "
+            "🔐 Login now to enter an emailed/SMS code interactively."
+        ) from exc
     except ChallengeRequired as exc:
-        if code_provider is None:
-            raise RuntimeError(
-                "Instagram is asking for manual verification (an email/SMS code, "
-                "or 'was this you?' confirmation) — this can't be fully automated. "
-                "Use /admin → Instagram → 🔐 Login now to resolve it interactively, "
-                "log into this account from a real browser/phone once, or upload "
-                "a cookies.txt instead."
-            ) from exc
-        try:
-            resolved = cl.challenge_resolve(cl.last_json)
-        except Exception as resolve_exc:
-            raise RuntimeError(
-                f"Could not resolve Instagram's verification challenge: {resolve_exc}"
-            ) from resolve_exc
-        if not resolved:
-            raise RuntimeError("Instagram's verification challenge was not resolved.") from exc
+        raise RuntimeError(
+            "Instagram is asking for manual verification (an email/SMS code, "
+            "an age/birthdate confirmation, or 'was this you?' confirmation) — "
+            "this can't be fully automated. Use /admin → Instagram → "
+            "🔐 Login now to resolve it interactively, log into this account "
+            "from a real browser/phone once, or upload a cookies.txt instead."
+        ) from exc
     except BadPassword as exc:
         raise RuntimeError(
             "Instagram rejected this login. This is usually NOT actually a "
@@ -321,6 +282,99 @@ def _perform_login(cl, username: str, password: str, *, code_provider: CodeProvi
             "Instagram is rate-limiting login attempts on this account/IP — "
             "wait 15–30 minutes before it retries automatically."
         ) from exc
+
+
+def _perform_login_interactive(cl, username: str, password: str, code_provider: CodeProvider) -> None:
+    """Step through the CAA login manually (rather than cl.login()) so we can
+    see — and interactively resolve — a "youth regulation" age-confirmation
+    checkpoint before instagrapi's own fallback path turns it into a generic,
+    unrecoverable "needs_upgrade" error. cl.login() doesn't expose this: on a
+    non-2FA CAA failure it silently retries via login_legacy(), which hits
+    the exact same checkpoint and fails the same way, surfacing only a
+    misleading version-mismatch message with no way to intervene.
+    """
+    if not cl.bloks_caa_login_prepare(username=username):
+        raise RuntimeError("Instagram did not return an account-access token for this login attempt.")
+
+    result = cl.bloks_caa_login_send_request(password, username=username, auto_prepare=False)
+    if cl.bloks_apply_login_response(result):
+        return  # logged in on the first pass, nothing more to do
+
+    if cl.bloks_caa_login_needs_two_step(result):
+        code = _totp_code() or (
+            code_provider(
+                username, "the verification code Instagram just sent (email, SMS, or authenticator app)"
+            )
+            or ""
+        ).strip()
+        if not code:
+            raise RuntimeError("No verification code was provided — login cancelled.")
+        two_step = cl.bloks_caa_resolve_two_step_verification(result, verification_code=code)
+        if two_step.get("logged_in"):
+            return
+        raise RuntimeError("Instagram rejected that verification code.")
+
+    markers = cl._caa_result_action_markers(result)
+    if any("YOUTH_REGULATION" in marker for marker in markers):
+        _resolve_youth_regulation_checkpoint(cl, username, password, result, code_provider)
+        return
+
+    raise RuntimeError(
+        f"Instagram declined this login for an unrecognized reason (markers: {markers})."
+    )
+
+
+def _resolve_youth_regulation_checkpoint(cl, username: str, password: str, result: dict, code_provider: CodeProvider) -> None:
+    """Meta's age/"youth regulation" check on a first-time device. Ask the
+    account holder to confirm their own birthdate live, in chat — never
+    supplied or guessed by this code — then submit exactly what they say and
+    retry the login once."""
+    birthday = (
+        code_provider(
+            username,
+            "your account's birthdate (DD-MM-YYYY) — Instagram is asking you to "
+            "confirm it before this login can continue",
+        )
+        or ""
+    ).strip()
+    if not birthday:
+        raise RuntimeError("No birthdate was provided — login cancelled.")
+
+    extracted = cl._caa_extract_state(result)
+    state = {
+        "device_id": cl.android_device_id,
+        "family_device_id": cl.phone_id,
+        "qe_device_id": cl.uuid,
+        "waterfall_id": cl.caa_waterfall_id,
+        "machine_id": cl.mid,
+        "flow_info": json.dumps({"flow_name": "new_to_family_ig_default", "flow_type": "ntf"}),
+        "reg_info": extracted.get("reg_info", ""),
+        "reg_context": extracted.get("reg_context", ""),
+    }
+    response = cl.caa_reg_graphql(
+        "com.bloks.www.bloks.caa.reg.birthday.async",
+        state=state,
+        current_step=6,
+        client_input_params={
+            "accounts_list": [],
+            "client_timezone": getattr(cl, "timezone_offset", 0),
+            "birthday_or_current_date_string": birthday,
+            "birthday_timestamp": int(time.time()),
+            "os_age_range": "o18",
+            "should_skip_youth_tos": False,
+            "is_youth_regulation_flow_complete": False,
+        },
+        server_params={"si_device_param_network_info": ""},
+    )
+    if cl.bloks_apply_login_response(response):
+        return
+
+    # Birthday accepted but the flow didn't hand back a session directly —
+    # retry the login request now that the checkpoint should be cleared.
+    retry = cl.bloks_caa_login_send_request(password, username=username, auto_prepare=False, try_num=2)
+    if cl.bloks_apply_login_response(retry):
+        return
+    raise RuntimeError("Instagram still didn't complete login after confirming the birthdate.")
 
 
 def _save_session_and_cookies(cl, path: Path) -> None:

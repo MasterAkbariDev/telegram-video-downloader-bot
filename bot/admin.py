@@ -613,11 +613,24 @@ def _make_ig_code_provider(admin_id: int, bot, loop: asyncio.AbstractEventLoop):
     def provider(username: str, choice=None) -> str:
         q: "_queue.Queue[str]" = _queue.Queue()
         _pending_ig_code_queues[admin_id] = q
-        choice_label = {1: "email", 0: "SMS"}.get(choice, str(choice) if choice is not None else "unknown")
-        text = (
-            f"📩 <b>Instagram sent a verification code</b> ({esc(choice_label)}) "
-            f"for <code>{esc(username)}</code>.\n\nReply with the code, or /cancel."
-        )
+        short_labels = {1: "email", 0: "SMS"}
+        if choice in short_labels:
+            text = (
+                f"📩 <b>Instagram sent a verification code</b> ({short_labels[choice]}) "
+                f"for <code>{esc(username)}</code>.\n\nReply with the code, or /cancel."
+            )
+        elif isinstance(choice, str) and choice.strip():
+            # A fuller, human-readable prompt (e.g. an age/birthdate
+            # confirmation) — show it as-is rather than wrapping it oddly.
+            text = (
+                f"📩 <b>Instagram needs one more thing for</b> <code>{esc(username)}</code>:\n"
+                f"{esc(choice)}\n\nReply here, or /cancel."
+            )
+        else:
+            text = (
+                f"📩 <b>Instagram sent a verification code</b> for "
+                f"<code>{esc(username)}</code>.\n\nReply with the code, or /cancel."
+            )
         try:
             fut = asyncio.run_coroutine_threadsafe(
                 bot.send_message(admin_id, text, parse_mode=ParseMode.HTML), loop

@@ -2,6 +2,23 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.18 — 2026-09-21
+
+### Added
+- **🔐 Login now handles Meta's age/"youth regulation" checkpoint.** Root
+  cause of the persistent `needs_upgrade` ("Your version of Instagram is
+  out of date") error identified precisely: it's not a version or account
+  issue — it's Meta's age-verification flow, triggered for any first-time
+  ("cold start") automated device, that `instagrapi`'s `cl.login()` has no
+  handling for and silently mishandles into that generic error. The
+  interactive login now steps through the CAA flow manually so it can catch
+  this checkpoint and — same as it already does for 2FA codes — ask the
+  admin, live in chat, to confirm the account's real birthdate, then submits
+  exactly what they answer and resumes the login. Nothing is guessed or
+  submitted without a person directly confirming it in the moment. Needs a
+  live `🔐 Login now` run to complete once per device; after that the device
+  should no longer register as a first-time login.
+
 ## 1.8.17 — 2026-09-21
 
 ### Added
