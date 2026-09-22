@@ -348,7 +348,7 @@ def resolve_media(
             cancel_check()
 
         # TikTok CDN requires extract-session cookies — use yt-dlp's downloader.
-        fast = None if _is_tiktok_url(url) else ytdlp_http_candidate(info)
+        fast = None if _is_tiktok_url(url) else ytdlp_http_candidate(info, audio_preferred=audio_preferred)
         if fast:
             media_url, ext = fast
             dest = output_dir / f"download.{ext}"
@@ -581,7 +581,7 @@ def download_from_info(
     if cancel_check:
         cancel_check()
 
-    fast = None if _is_tiktok_url(url) else ytdlp_http_candidate(cached_info)
+    fast = None if _is_tiktok_url(url) else ytdlp_http_candidate(cached_info, audio_preferred=audio_preferred)
     if fast:
         media_url, ext = fast
         dest = output_dir / f"download.{ext}"

@@ -2,6 +2,23 @@
 
 All notable changes to this bot are documented here.
 
+## 1.11.2 — 2026-09-22
+
+### Fixed
+- **Audio requests could silently deliver a raw video file instead of an
+  MP3.** Side effect of 1.11.1's client-priority fix: when `bestaudio`
+  can't find a true audio-only stream on the now-preferred client and
+  yt-dlp's format selector falls back to a combined video+audio format,
+  the bot's own "fast path" download shortcut (`ytdlp_http_candidate()`,
+  which skips yt-dlp's own reprocessing when the raw bytes are already the
+  right deliverable) only checked the selected format's codec — not
+  whether the caller actually wanted audio — so it grabbed the raw MP4
+  directly and skipped the `FFmpegExtractAudio` postprocessor entirely.
+  `ytdlp_http_candidate()` now takes `audio_preferred` and always defers
+  to yt-dlp's normal (postprocessed) path for audio requests, regardless
+  of which format got selected upstream. Verified: the same track that
+  regressed into an `.mp4` now correctly produces a real `.mp3` again.
+
 ## 1.11.1 — 2026-09-22
 
 ### Fixed

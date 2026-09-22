@@ -138,8 +138,23 @@ def download_http(
     _download_sequential(client, url, dest, headers, progress_callback, total, cancel_check)
 
 
-def ytdlp_http_candidate(info: dict) -> tuple[str, str] | None:
-    """Return (media_url, ext) when yt-dlp info is a plain HTTP file (not HLS/DASH/merge)."""
+def ytdlp_http_candidate(info: dict, *, audio_preferred: bool = False) -> tuple[str, str] | None:
+    """Return (media_url, ext) when yt-dlp info is a plain HTTP file (not HLS/DASH/merge).
+
+    audio_preferred requests always skip this fast path. It exists to skip
+    yt-dlp's own (slower) reprocessing when the raw downloaded bytes are
+    already the exact right deliverable — true for a normal video request,
+    never true for an audio request: whatever format got selected still
+    needs FFmpegExtractAudio to guarantee a clean, correctly-labeled MP3.
+    This matters even when the selected format looks video-only-excluded
+    by the vcodec/ext checks below, because format selection can silently
+    degrade to a combined video+audio format (e.g. bestaudio finding no
+    true audio-only stream on some yt-dlp player clients) — that combined
+    file would otherwise sail through this fast path as a raw video
+    download, e.g. a "song" that's actually an .mp4.
+    """
+    if audio_preferred:
+        return None
     if info.get("fragments") or info.get("manifest_url"):
         return None
 
