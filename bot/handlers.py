@@ -305,24 +305,43 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         *(inline_cache.wait_until_ready(u, timeout=5.0) for u in need_prepare)
     )
 
+    still_preparing = False
     for url in need_prepare:
         name, emoji = msg.detect_platform(url)
         cached = media_cache.get_cached(url)
         if cached and cached.file_id:
             results.append(_inline_cached_result(url, cached, name, emoji))
             inline_cache.clear_prepare(url)
-        else:
-            st = inline_cache.get_prepare(url)
-            logger.info(
-                "Inline not ready yet %s status=%s err=%s (%.1fs)",
-                media_cache.cache_key(url),
-                st.status if st else None,
-                (st.error[:80] if st and st.error else None),
-                time.monotonic() - t0,
-            )
+            continue
 
+        st = inline_cache.get_prepare(url)
+        logger.info(
+            "Inline not ready yet %s status=%s err=%s (%.1fs)",
+            media_cache.cache_key(url),
+            st.status if st else None,
+            (st.error[:80] if st and st.error else None),
+            time.monotonic() - t0,
+        )
+        # A real download+upload cycle routinely takes well past the ~5s we
+        # can wait inside one inline query — that's expected, not a bug.
+        # The actual bug was answering with an EMPTY result list here:
+        # Telegram shows nothing at all (looks exactly like a dead
+        # timeout), and caching that empty answer even briefly means a
+        # same-text retry is served straight from Telegram's own client
+        # cache without ever reaching the bot again — forcing the
+        # "add/remove a space" workaround to force a distinct query
+        # string. Show an explicit placeholder instead, and never cache a
+        # not-ready answer, so an unmodified retry reaches the bot as soon
+        # as the user tries again.
+        if st and st.status == "error":
+            results.append(_inline_error_result(url, st.error or "Could not prepare this link."))
+        else:
+            still_preparing = True
+            results.append(_inline_preparing_result(url, name, emoji))
+
+    cache_time = 0 if still_preparing else (5 if not results else 30)
     try:
-        await inline.answer(results, cache_time=5 if not results else 30, is_personal=True)
+        await inline.answer(results, cache_time=cache_time, is_personal=True)
         logger.info(
             "Inline answered user=%s results=%d elapsed=%.1fs",
             user_id,
@@ -337,6 +356,28 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             len(results),
             exc,
         )
+
+
+def _inline_preparing_result(url: str, name: str, emoji: str):
+    return InlineQueryResultArticle(
+        id=f"prep{abs(hash(url)) % 10**10}",
+        title=f"⏳ Preparing {emoji} {name} link…",
+        description="Still downloading — wait a few seconds, then search again to send it.",
+        input_message_content=InputTextMessageContent(
+            message_text="⏳ Still preparing that link — wait a few seconds and try again.",
+        ),
+    )
+
+
+def _inline_error_result(url: str, error: str):
+    return InlineQueryResultArticle(
+        id=f"err{abs(hash(url)) % 10**10}",
+        title="❌ Could not prepare this link",
+        description=error[:100],
+        input_message_content=InputTextMessageContent(
+            message_text=f"❌ {error}",
+        ),
+    )
 
 
 def _inline_cached_result(url: str, cached, name: str, emoji: str):

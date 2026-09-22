@@ -2,6 +2,24 @@
 
 All notable changes to this bot are documented here.
 
+## 1.11.4 — 2026-09-22
+
+### Fixed
+- **Inline mode (`@bot link`) looked like it timed out on the first try,
+  needing the link re-typed with an extra space to actually work.** Two
+  compounding bugs, not one: (1) a real download+upload cycle routinely
+  takes well past the ~5s an inline query can wait, which is expected —
+  but when not ready in time, the bot answered with an *empty* result
+  list, so Telegram showed nothing at all, indistinguishable from a dead
+  timeout; (2) that empty answer was cached client-side for 5s, so even
+  waiting and retrying the *identical* text didn't reach the bot again —
+  only changing the query string (the "add/remove a space" workaround)
+  forced Telegram to ask fresh. Now shows an explicit "⏳ Preparing…" (or
+  "❌ failed: &lt;reason&gt;") placeholder instead of nothing, and never
+  caches a not-ready answer, so trying the exact same query again a few
+  seconds later reaches the bot immediately and picks up the finished
+  result — no more space trick needed.
+
 ## 1.11.3 — 2026-09-22
 
 ### Fixed
