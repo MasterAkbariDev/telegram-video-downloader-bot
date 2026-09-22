@@ -471,6 +471,38 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
     raise RuntimeError(f"Instagram declined this login for an unrecognized reason{detail}. Check server logs for the raw response.")
 
 
+def _bloks_deep_context_data(cl, result: dict, app_id: str) -> str:
+    """Like instagrapi's own cl.bloks_extract_context_data(), but finds the
+    "context_data" key/value pair at ANY nesting depth, not just the
+    outermost (dkc keys)/(dkc values) pair immediately after the app id's
+    (f4i ...) wrapper.
+
+    Empirically (captured from a live two-step verification entrypoint
+    response), Instagram sometimes nests context_data one level deeper —
+    inside the VALUE of an outer "server_params"/"client_input_params" pair
+    — rather than as the first pair. instagrapi's version walks "(dkc"
+    occurrences with a cursor that jumps to the end of each balanced group
+    it finds, so a nested "(dkc "context_data" ...)" sitting inside an
+    earlier group's own value is skipped over entirely and it always
+    returns "" for this response shape. This searches directly for the
+    "context_data" keys/values pair itself and only accepts a match whose
+    nearby preceding text names the exact app id (not a same-prefixed
+    sibling action, e.g. "...code_entry_help" when looking for
+    "...code_entry").
+    """
+    strings: list[str] = []
+    cl._bloks_collect_strings(result, strings)
+    anchor_re = re.compile(re.escape(app_id) + r"(?![_a-zA-Z])")
+    pair_re = re.compile(r'\(dkc "context_data"[^()]*\)\s*\(dkc "((?:[^"\\]|\\.)*)"')
+    best = ""
+    for text in strings:
+        for m in pair_re.finditer(text):
+            window = text[max(0, m.start() - 400) : m.start()]
+            if anchor_re.search(window):
+                best = m.group(1)
+    return best
+
+
 def _resolve_caa_two_step_verification(cl, username: str, send_result: dict, code_provider: CodeProvider) -> dict:
     """Same three sub-steps as instagrapi's own bloks_caa_resolve_two_step_verification()
     (entrypoint -> code_entry -> submit_code), but asks for the code only
@@ -478,19 +510,23 @@ def _resolve_caa_two_step_verification(cl, username: str, send_result: dict, cod
     make Instagram dispatch the code. instagrapi's version takes the code as
     a parameter up front, which forces a caller into asking a human for a
     code before Instagram has been told to send one; the code request was
-    landing before anything existed to find. This fixes that ordering."""
+    landing before anything existed to find. This fixes that ordering.
+
+    Also uses _bloks_deep_context_data() instead of cl.bloks_extract_context_data()
+    at every step — see that function's docstring for why.
+    """
     from instagrapi.mixins.bloks import (
         AP_2SV_CODE_ENTRY,
         AP_2SV_CODE_ENTRY_ASYNC,
         AP_2SV_ENTRYPOINT,
     )
 
-    entry_context = cl.bloks_extract_context_data(send_result, AP_2SV_ENTRYPOINT)
+    entry_context = _bloks_deep_context_data(cl, send_result, AP_2SV_ENTRYPOINT)
     if not entry_context:
         return {"logged_in": False, "reason": "missing entrypoint context_data"}
     entry_result = cl.bloks_ap_two_step_verification_entrypoint(entry_context)
 
-    code_context = cl.bloks_extract_context_data(entry_result, AP_2SV_CODE_ENTRY)
+    code_context = _bloks_deep_context_data(cl, entry_result, AP_2SV_CODE_ENTRY)
     if not code_context:
         logger.warning(
             "Two-step entrypoint for %s didn't offer a code_entry step — "
@@ -504,7 +540,7 @@ def _resolve_caa_two_step_verification(cl, username: str, send_result: dict, cod
     # call — only ask the human for it now.
     code_result = cl.bloks_ap_two_step_verification_code_entry(code_context)
 
-    submit_context = cl.bloks_extract_context_data(code_result, AP_2SV_CODE_ENTRY_ASYNC)
+    submit_context = _bloks_deep_context_data(cl, code_result, AP_2SV_CODE_ENTRY_ASYNC)
     if not submit_context:
         return {"logged_in": False, "reason": "missing code_entry_async context_data"}
 

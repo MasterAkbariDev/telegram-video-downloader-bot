@@ -2,6 +2,24 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.28 — 2026-09-22
+
+### Fixed
+- **`cl.bloks_extract_context_data()` returned "" for the two-step
+  verification `code_entry` step, on every account tested** — captured and
+  confirmed live against both `dpdotell` and the main configured account.
+  instagrapi's extractor pairs the first `(dkc keys)`/`(dkc values)` group
+  it finds right after an action's `(f4i ...)` wrapper, but on this
+  entrypoint response Instagram nests `context_data` one level deeper —
+  inside the *value* of an outer `server_params`/`client_input_params`
+  pair — and the extractor's cursor jumps straight past that nested group
+  without ever looking inside it, so it always returned "" here even
+  though the real token is present in the raw response. Added
+  `_bloks_deep_context_data()`, which searches directly for the
+  `context_data` key/value pair at any nesting depth (verified byte-for-byte
+  against the actual captured response) and now backs all three steps of
+  `_resolve_caa_two_step_verification()` (1.8.26).
+
 ## 1.8.27 — 2026-09-22
 
 ### Fixed
