@@ -2,6 +2,26 @@
 
 All notable changes to this bot are documented here.
 
+## 1.11.1 — 2026-09-22
+
+### Fixed
+- **Found the actual root cause of the recurring Spotify/YouTube 403s** —
+  diagnosed live on production with real SSH access: it was never
+  rate-limiting. `extractor_args.youtube.player_client` had `android_vr`
+  listed *first*. That client reliably extracts a well-formed format —
+  yt-dlp reports success, `http_headers` are populated and correctly
+  forwarded to the bot's own fast-download path — but the resulting
+  googlevideo.com URL then 403s on the actual fetch, every time, headers
+  or not. Verified directly: extracting the same video with `android_vr`
+  removed from the front falls through to the `android` client and
+  fetches successfully (200 OK, full content) instead. Reordered so `tv`,
+  `web_embedded`, `mweb`, `android`, and `web` are all preferred over it;
+  `android_vr` is now a last resort only, in case every other client ever
+  fails to *extract* at all (not just fetch) for some future video. This
+  fixes the failure for every non-YouTube-specific download path too
+  (Spotify's `ytsearch5:` fallback, the YouTube-unavailable fallback,
+  quality-picker downloads) — not just the one track reported.
+
 ## 1.11.0 — 2026-09-22
 
 ### Added

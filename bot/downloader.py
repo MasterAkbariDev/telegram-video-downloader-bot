@@ -1397,14 +1397,25 @@ def _build_ydl_opts(
         "extractor_args": {
             # Prefer clients that work without PO tokens / honor cookies.
             # Avoid ios-first (ignores cookies) and skip webpage (hurts bot checks).
+            #
+            # android_vr used to be first here, but confirmed live in
+            # production (journalctl + a direct extract-then-fetch probe on
+            # the real server) that it reliably extracts a *successfully
+            # parsed* format whose googlevideo.com URL then 403s on the
+            # actual fetch — every single time, headers correctly forwarded
+            # or not. tv/web_embedded/mweb all fell through to the "android"
+            # client instead and fetched fine (200 OK, full content) for the
+            # exact same video. Kept as an absolute last resort only, not
+            # preferred, in case every other client ever fails to extract at
+            # all (not just fetch) for some future video.
             "youtube": {
                 "player_client": [
-                    "android_vr",
                     "tv",
                     "web_embedded",
                     "mweb",
                     "android",
                     "web",
+                    "android_vr",
                 ],
             },
         },
