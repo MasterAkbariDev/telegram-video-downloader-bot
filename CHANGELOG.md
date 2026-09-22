@@ -2,6 +2,28 @@
 
 All notable changes to this bot are documented here.
 
+## 1.12.0 — 2026-09-22
+
+### Changed
+- **`pick_enabled_account()` now excludes accounts that have never
+  actually logged in** (no session AND no cookies on disk at all —
+  confirmed live: exactly this cost ~35s of a doomed first-login attempt
+  on any download that happened to pick that account). A first login is a
+  slow, CAA-flow-heavy operation that shouldn't block a user's download —
+  it should only happen via an explicit admin action (🔐 Login now / ➕
+  Create account / ⬆️ Upload cookies.txt). An account that HAS worked
+  before (a saved session from this bot's own login, *or* just a manually
+  uploaded cookies.txt with no session) stays fully eligible even if its
+  cookies have since gone stale — `ensure_instagram_cookies()` already
+  retries/refreshes that case normally, unaffected by this change. Verified
+  with a 3-account test (never-logged-in, session-only, cookies-only): the
+  first is correctly never picked across 60 tries, the other two both are.
+  Admin panel now shows a distinct 🆕 icon (was lumped in with ⚠️) for the
+  true "needs a first login" case specifically.
+- Re-enabled `dpdotel` (manually disabled last version as a stopgap) —
+  this fix now excludes it automatically and correctly regardless of its
+  `enabled` flag, since it has no session or cookies.
+
 ## 1.11.5 — 2026-09-22
 
 ### Changed

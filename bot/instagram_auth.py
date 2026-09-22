@@ -60,10 +60,33 @@ def instagram_credentials_configured() -> bool:
 
 
 def pick_enabled_account() -> dict | None:
-    """Uniform-random choice among enabled configured accounts, or None if
-    nothing is configured/enabled — every download/like/save/follow-request
-    that doesn't care which specific account handles it goes through this."""
-    accounts = [a for a in cfg.get_instagram_accounts() if a.get("enabled", True)]
+    """Uniform-random choice among enabled configured accounts that have
+    *at least once* successfully logged in, or None if nothing qualifies —
+    every download/like/save/follow-request that doesn't care which
+    specific account handles it goes through this.
+
+    An account that's only ever been added but has no session AND no
+    cookies on disk at all — never completed a login, never had cookies
+    manually uploaded either — is excluded here. Confirmed live: this
+    happened for real, costing ~35s of a doomed first-login attempt on
+    every download that picked it. A first login is a slow, CAA-flow-heavy
+    operation that shouldn't block a user's download — it should only
+    happen via an explicit admin action (🔐 Login now / ➕ Create account /
+    ⬆️ Upload cookies.txt).
+
+    An account that has EITHER a session (logged in via this bot before)
+    OR just a cookies file (e.g. manually uploaded, never auto-logged-in)
+    is still included, even if that cookies file has since gone stale:
+    ensure_instagram_cookies() already retries that case normally, and
+    it's a routine session-validity check on a known account (usually
+    fast — instagrapi's own cl.login() checks the existing session first),
+    not a first-time login.
+    """
+    accounts = [
+        a
+        for a in cfg.get_instagram_accounts()
+        if a.get("enabled", True) and any(p.is_file() for p in _account_paths(a["username"]))
+    ]
     if not accounts:
         return None
     return random.choice(accounts)

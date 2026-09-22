@@ -136,6 +136,11 @@ def ig_accounts_menu_keyboard() -> InlineKeyboardMarkup:
             icon = "⏳"
         elif status["valid"]:
             icon = "✅"
+        elif not status["session_saved"] and not status["exists"]:
+            # No session AND no cookies at all — excluded from automatic
+            # rotation (pick_enabled_account()); needs 🔐 Login now, ➕
+            # Create account, or ⬆️ Upload cookies.txt here.
+            icon = "🆕"
         else:
             icon = "⚠️"
         rows.append(
@@ -1265,10 +1270,10 @@ def _ig_account_detail_text(username: str) -> str:
         return f"📸 <b>{esc(username)}</b>\n\n<i>This account no longer exists.</i>"
     status = instagram_cookies_status(account)
 
-    if not status["exists"]:
-        state = "❌ Not set — private/checkpoint-gated posts via this account will fail"
+    if not status["exists"] and not status["session_saved"]:
+        state = "🆕 Never logged in — excluded from automatic rotation until you tap 🔐 Login now"
     elif not status["valid"]:
-        state = "⚠️ File exists but looks invalid/expired"
+        state = "⚠️ Logged in before, but cookies now look invalid/expired — still eligible for a retry login"
     else:
         age = status["age_days"]
         age_txt = f"{age:.1f} days old" if age is not None else "age unknown"
@@ -1278,6 +1283,8 @@ def _ig_account_detail_text(username: str) -> str:
     bits.append("proxy set" if status["proxy_configured"] else "⚠️ no proxy — higher risk of rejection")
     bits.append("TOTP set" if status["totp_configured"] else "no TOTP (2FA accounts need this)")
     bits.append("enabled" if status["enabled"] else "⏸ disabled — excluded from rotation")
+    if status["enabled"] and not status["session_saved"] and not status["exists"]:
+        bits.append("🆕 no session or cookies yet — excluded from automatic rotation regardless of enabled")
     cooldown = status["cooldown_remaining_sec"]
     cooldown_line = f"\n⏳ Cooling down after a failed attempt — {cooldown / 60:.0f} min left" if cooldown > 0 else ""
 
