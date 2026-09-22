@@ -2,6 +2,36 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.25 — 2026-09-22
+
+### Fixed
+- **Albums/carousels of more than 10 items were silently truncated.**
+  Telegram allows at most 10 items per `sendMediaGroup` call, and every
+  place we built a media group sliced with `[:10]` instead of splitting
+  the rest into follow-up messages — so anything past the 10th photo/video
+  in a post just vanished. Instagram allows up to 20 items per carousel, so
+  this was a real, regular loss. `bot/uploader.py`'s `_send_album()` now
+  sends any number of items across as many `reply_media_group` calls as
+  needed (10 at a time), including the CDN-hotlink-failed → re-download
+  fallback path; the cached-album re-send path in `bot/handlers.py` and the
+  extraction-time caps in `bot/instagram.py`, `bot/twitter.py`, and
+  `bot/hikerapi.py` no longer discard anything past the 10th item either.
+- **Interactive Instagram login (admin "🔐 Login now", and the same path
+  used right after account creation) always performed a brand-new
+  password-based CAA login, even when a previously saved session was
+  already loaded and still valid.** `cl.login()` itself checks this first
+  (`account_info()` on the existing session, only falling back to a fresh
+  CAA login if that fails) — but the manual Bloks orchestration built to
+  handle the youth-regulation checkpoint bypassed `cl.login()` entirely and
+  so skipped that shortcut on every single call, including retries. Every
+  retry was therefore indistinguishable from a fresh suspicious login
+  attempt to Instagram's abuse detection, which compounds exactly the
+  checkpoint/challenge problem it was trying to work around. Now mirrors
+  `cl.login()`'s own check before doing anything else.
+- **No cooldown on manual login retries.** Added a 45s minimum gap between
+  "Login now" attempts — rapid re-taps (including while debugging) are
+  themselves a signal Instagram's fraud system watches for.
+
 ## 1.8.24 — 2026-09-21
 
 ### Fixed

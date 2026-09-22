@@ -76,7 +76,7 @@ def resolve_via_hikerapi(
     if media_type == 8:  # carousel
         resources = media.get("resources") or []
         album: list[AlbumItem] = []
-        for item in resources[:10]:
+        for item in resources:
             if not isinstance(item, dict):
                 continue
             video_url = item.get("video_url")

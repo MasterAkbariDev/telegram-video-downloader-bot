@@ -126,7 +126,9 @@ def resolve_instagram_album(
     if not images and len(videos) <= 1:
         return None
 
-    slides = slides[:10]  # Telegram album max 10
+    # No cap here — Telegram allows 10 items per media group, but the
+    # uploader (bot/uploader.py) splits longer albums across multiple
+    # messages, so the full carousel (Instagram allows up to 20) gets sent.
     only_images = all(s.kind == "image" for s in slides)
 
     # Prefer CDN URLs — Telegram can fetch Instagram CDN directly (much faster)

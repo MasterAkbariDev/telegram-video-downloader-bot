@@ -47,6 +47,8 @@ _LOGIN_LOCK = threading.Lock()
 _SESSION_MAX_AGE_SEC = 5 * 24 * 3600  # refresh every ~5 days
 _LOGIN_FAILURE_COOLDOWN_SEC = 30 * 60  # don't hammer Instagram after a failed login
 _last_login_failure_at = 0.0
+_INTERACTIVE_MIN_INTERVAL_SEC = 45  # guard against rapid re-taps of "Login now"
+_last_interactive_attempt_at = 0.0
 
 
 def instagram_credentials_configured() -> bool:
@@ -347,9 +349,27 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
     from instagrapi.exceptions import (
         BadPassword,
         ChallengeRequired,
+        LoginRequired,
         PleaseWaitFewMinutes,
         TwoFactorRequired,
     )
+
+    # cl.login() itself skips straight to a validity check (account_info())
+    # when a previously saved session is already loaded, and only falls back
+    # to a brand-new password-based CAA login if that check fails. This
+    # function bypassed cl.login() entirely (to reach the youth-regulation
+    # checkpoint before instagrapi's fallback swallows it) and so, until now,
+    # unconditionally re-ran the *full* CAA login every single call — even
+    # on a retry where the existing session was still perfectly valid. That
+    # repeated full-login traffic is exactly the kind of pattern that gets
+    # an account challenged/flagged more aggressively over time, so mirror
+    # cl.login()'s shortcut here first.
+    if cl.user_id:
+        try:
+            cl.account_info()
+            return
+        except LoginRequired:
+            pass
 
     try:
         if not cl.bloks_caa_login_prepare(username=username):
@@ -600,8 +620,22 @@ def interactive_login(code_provider: CodeProvider) -> dict:
     if not username or not password:
         raise RuntimeError("INSTAGRAM_USERNAME / INSTAGRAM_PASSWORD not set")
 
-    global _last_login_failure_at
+    global _last_login_failure_at, _last_interactive_attempt_at
     with _LOGIN_LOCK:
+        # Every failed retry so far has been a brand-new password-based login
+        # attempt against Instagram's fraud/abuse system — rapid back-to-back
+        # taps of "Login now" (including while debugging) is itself a pattern
+        # that gets an account challenged more, independent of anything else
+        # about the request. Force a minimum gap between attempts.
+        wait_left = _INTERACTIVE_MIN_INTERVAL_SEC - (time.time() - _last_interactive_attempt_at)
+        if wait_left > 0:
+            raise RuntimeError(
+                f"Please wait {wait_left:.0f}s before trying again — retrying "
+                "instantly makes Instagram's abuse detection more suspicious, "
+                "not less."
+            )
+        _last_interactive_attempt_at = time.time()
+
         logger.info("Instagram interactive login as %s…", username)
         cl = _build_client(seed=username)
         try:

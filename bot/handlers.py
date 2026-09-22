@@ -739,7 +739,8 @@ async def _process_url(
                         )
                 if not media_group:
                     raise BadRequest("Empty album cache")
-                await message.reply_media_group(media=media_group[:10])
+                for i in range(0, len(media_group), 10):
+                    await message.reply_media_group(media=media_group[i : i + 10])
                 result = MediaResult(
                     title=cached.title,
                     is_audio=False,

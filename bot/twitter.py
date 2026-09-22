@@ -119,7 +119,7 @@ def resolve_x_post(
         )
 
     album = [
-        AlbumItem(kind="image", url=s.url, path=None, file_size=None) for s in images[:10]
+        AlbumItem(kind="image", url=s.url, path=None, file_size=None) for s in images
     ]
     logger.info("X album %s: %d CDN photo(s)", tid, len(album))
     return MediaResult(

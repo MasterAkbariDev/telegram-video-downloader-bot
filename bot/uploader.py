@@ -371,6 +371,45 @@ async def _send_photo(message: Message, result: MediaResult, caption: str = "") 
             opened.close()
 
 
+_ALBUM_CHUNK_SIZE = 10  # Telegram's limit per reply_media_group call
+
+
+async def _send_album_chunk(message: Message, chunk: list, caption: str) -> list:
+    """Send one batch (<=10 items) of an album, with CDN-hotlink→disk fallback on failure."""
+    media_group = _build_album_media(chunk, caption=caption)
+    if not media_group:
+        return []
+
+    try:
+        return await message.reply_media_group(media=media_group)
+    except BadRequest as exc:
+        logger.warning("Album chunk send failed (%s) — retrying", exc)
+
+    # CDN hotlink failed → download to disk then upload bytes
+    materialized = await asyncio.to_thread(_materialize_album_urls, chunk)
+    media_group = _build_album_media(materialized, caption=caption) if materialized else []
+    if media_group:
+        try:
+            return await message.reply_media_group(media=media_group)
+        except BadRequest as exc:
+            logger.warning("Album chunk retry after materializing also failed (%s)", exc)
+
+    bare = _build_album_media(materialized or chunk, caption="")
+    if not bare:
+        raise RuntimeError("No album items to send for this chunk.")
+    sent = await message.reply_media_group(media=bare)
+    if caption:
+        try:
+            await message.reply_text(
+                caption,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except TelegramError as cap_exc:
+            logger.warning("Could not send album caption separately: %s", cap_exc)
+    return sent
+
+
 async def _send_album(
     message: Message,
     result: MediaResult,
@@ -393,54 +432,20 @@ async def _send_album(
         return await send_media(message, single, caption)
 
     url_only = all(not item.path and item.url for item in album)
+    n_chunks = (len(album) + _ALBUM_CHUNK_SIZE - 1) // _ALBUM_CHUNK_SIZE
     logger.info(
-        "Uploading media group (%d items, reply%s)",
+        "Uploading media group (%d items in %d message%s, reply%s)",
         len(album),
+        n_chunks,
+        "" if n_chunks == 1 else "s",
         ", CDN URLs" if url_only else "",
     )
-    media_group = _build_album_media(album, caption=caption)
-    if not media_group:
-        raise RuntimeError("No album items to send.")
 
-    try:
-        sent_list = await message.reply_media_group(media=media_group[:10])
-    except BadRequest as exc:
-        logger.warning("Album send failed (%s) — retrying", exc)
-        # CDN hotlink failed → download to disk then upload bytes
-        if url_only:
-            album = await asyncio.to_thread(_materialize_album_urls, album)
-            result.album = album
-            media_group = _build_album_media(album, caption=caption)
-            if not media_group:
-                raise
-            try:
-                sent_list = await message.reply_media_group(media=media_group[:10])
-            except BadRequest:
-                bare = _build_album_media(album, caption="")
-                sent_list = await message.reply_media_group(media=bare[:10])
-                if caption:
-                    try:
-                        await message.reply_text(
-                            caption,
-                            parse_mode=ParseMode.HTML,
-                            disable_web_page_preview=True,
-                        )
-                    except TelegramError as cap_exc:
-                        logger.warning("Could not send album caption separately: %s", cap_exc)
-        else:
-            bare = _build_album_media(album, caption="")
-            if not bare:
-                raise
-            sent_list = await message.reply_media_group(media=bare[:10])
-            if caption:
-                try:
-                    await message.reply_text(
-                        caption,
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                    )
-                except TelegramError as cap_exc:
-                    logger.warning("Could not send album caption separately: %s", cap_exc)
+    sent_list: list = []
+    for i in range(0, len(album), _ALBUM_CHUNK_SIZE):
+        chunk = album[i : i + _ALBUM_CHUNK_SIZE]
+        chunk_caption = caption if i == 0 else ""
+        sent_list.extend(await _send_album_chunk(message, chunk, chunk_caption))
 
     if sent_list:
         # Prefer returning all file_ids so albums can be cached for instant re-send
