@@ -523,6 +523,17 @@ def _extract_xvideos(url: str, client: httpx.Client) -> _Extracted | None:
     if not page or not _page_looks_like_video(page.text):
         return None
     candidates = _all_xvideos_player_urls(page.text)
+    # xvideos.com replaced its old setVideoUrlHigh/Low/HLS(...) JS calls with
+    # a bare setVideoURL(...) call — unlike the old ones, that one carries a
+    # relative PAGE path (the video's own canonical URL), not a media URL at
+    # all, so _all_xvideos_player_urls() (which only ever matched the old
+    # calls) now returns nothing on current pages. The real, playable MP4
+    # only appears in a <script type="application/ld+json"> VideoObject's
+    # contentUrl field. Kept _all_xvideos_player_urls() as a first try in
+    # case the old pattern ever comes back (e.g. a mirror or A/B variant).
+    ld_json_url = _find_ld_json_video(page.text)
+    if ld_json_url and ld_json_url not in candidates:
+        candidates.append(ld_json_url)
     return _finalize_extraction(client, _find_title(page.text) or "Video", candidates, referer=page.url)
 
 

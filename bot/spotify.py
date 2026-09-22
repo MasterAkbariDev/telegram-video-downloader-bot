@@ -375,24 +375,51 @@ def _resolve_music_by_query(
     for cand in candidates[:_MAX_DOWNLOAD_TRIES]:
         if cancel_check:
             cancel_check()
-        try:
-            result = _download_music_candidate(
-                cand,
-                display_title=display_title,
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
-                force_audio=force_audio,
-            )
-            if result:
-                logger.info("Music resolved via %s: %r", cand.source, cand.title)
-                return result
-        except Exception as exc:
-            errors.append(f"{cand.source}: {exc}")
+        last_exc: Exception | None = None
+        # A 403/429 from a source is very often a momentary block (YouTube
+        # and SoundCloud both do this under bursty traffic) rather than a
+        # real "this candidate doesn't exist" failure — one quick retry
+        # after a short backoff clears most of these instead of burning the
+        # whole candidate and falling through to a worse-ranked match.
+        for attempt in (1, 2):
+            try:
+                result = _download_music_candidate(
+                    cand,
+                    display_title=display_title,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                    force_audio=force_audio,
+                )
+                if result:
+                    logger.info("Music resolved via %s: %r", cand.source, cand.title)
+                    return result
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                text = str(exc).lower()
+                looks_transient = any(
+                    marker in text for marker in ("403", "429", "forbidden", "too many requests")
+                )
+                if attempt == 1 and looks_transient:
+                    import time
+
+                    logger.info(
+                        "Music candidate looked transiently blocked (%s %r), retrying once: %s",
+                        cand.source, cand.title, exc,
+                    )
+                    if cancel_check:
+                        cancel_check()
+                    time.sleep(1.5)
+                    continue
+                break
+        if last_exc:
+            errors.append(f"{cand.source}: {last_exc}")
             logger.warning(
                 "Music candidate failed (%s %r): %s",
                 cand.source,
                 cand.title,
-                exc,
+                last_exc,
             )
 
     if allow_yt_search:

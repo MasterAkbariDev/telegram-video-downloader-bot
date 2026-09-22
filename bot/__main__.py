@@ -42,6 +42,7 @@ from bot.updater import notify_pending_update
 from bot.update_check import notify_admins_if_update_available, update_check_loop
 from bot.version import format_version_label
 from bot import media_cache
+from bot.ytdlp_updater import ytdlp_update_loop
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,9 @@ async def _post_init(application) -> None:
     asyncio.create_task(update_check_loop(application))
     # Notify requesters once a follow request they made is accepted/declined
     asyncio.create_task(follow_request_poll_loop(application))
+    # Keep yt-dlp current — it's still the primary/best-maintained extractor
+    # for YouTube specifically, so a stale copy there costs the most
+    asyncio.create_task(ytdlp_update_loop(application))
 
 
 def _build_application() -> Application:

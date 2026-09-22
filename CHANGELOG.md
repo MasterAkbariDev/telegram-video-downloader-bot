@@ -2,6 +2,51 @@
 
 All notable changes to this bot are documented here.
 
+## 1.10.0 — 2026-09-22
+
+### Fixed
+- **XVideos downloads were completely broken.** xvideos.com replaced its
+  player's old `setVideoUrlHigh/Low/HLS(...)` JS calls with a bare
+  `setVideoURL(...)` call that — unlike the old ones — carries a relative
+  *page* path, not a media URL at all. Both yt-dlp's own extractor (latest
+  release, 2026.8.19 — no newer version exists to update to) and this
+  bot's own `bot/fallback.py` used the exact same stale pattern set and
+  both failed identically on every current xvideos.com page. The real,
+  playable MP4 now only appears in a `<script type="application/ld+json">`
+  `VideoObject`'s `contentUrl` field — `_extract_xvideos()` now finds that
+  too, reusing `_find_ld_json_video()` (a helper that already existed in
+  this file for other sites). Verified live end-to-end: a real video
+  downloaded successfully through the actual `fallback_resolve()` path.
+- **Spotify tracks occasionally failing with "Access to this content was
+  denied by the site."** A 403/429 from a candidate source (YouTube,
+  SoundCloud) is very often a momentary block rather than a real "this
+  doesn't exist" failure. `_resolve_music_by_query()` now retries a
+  candidate once, after a short backoff, when its failure looks transient,
+  before moving on to the next-ranked match.
+
+### Changed
+- **Extraction priority flipped for every non-YouTube site.** yt-dlp is
+  genuinely best-maintained for YouTube specifically; everywhere else,
+  this bot's own extractor (`bot/fallback.py` — kept current against this
+  bot's actual traffic, not yt-dlp's release cadence) is now tried
+  *first*, with yt-dlp only as the fallback if it finds nothing. Spotify,
+  Instagram photos, X, Pinterest, and TikTok already worked this way; this
+  extends it to adult sites (where the concrete XVideos breakage above
+  was found) and every other non-YouTube domain, including ones with no
+  dedicated extractor at all — `bot/fallback.py` already has a generic
+  OG-tag/JSON-LD scrape for those. yt-dlp remains fully available as a
+  real fallback throughout, so nothing that worked before can regress —
+  worst case is a bit of extra latency on a site where our own extractor
+  finds nothing.
+
+### Added
+- **Automatic yt-dlp updates** (`bot/ytdlp_updater.py`). Checks PyPI daily
+  and pip-upgrades yt-dlp when a newer version is available, then restarts
+  the bot in place (`os.execv` — works under systemd, plain `nohup`, or
+  Docker, not just systemd) to actually load it, since Python doesn't
+  hot-reload an already-imported package. Admins get a message either way
+  (updated + restarting, or the upgrade attempt failed).
+
 ## 1.9.2 — 2026-09-22
 
 ### Added

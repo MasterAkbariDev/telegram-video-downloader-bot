@@ -151,6 +151,14 @@ def resolve_media(
 
     When max_height is set (quality picker), skip CDN platform shortcuts and
     download via yt-dlp at that height.
+
+    Extraction priority: yt-dlp is primary only for YouTube — it's the
+    best-maintained extractor there. Everywhere else, this bot's own
+    extractors go first (Spotify/Instagram-photos/X/Pinterest/TikTok above,
+    then bot/fallback.py's own-extractor-first pre-pass below for
+    everything else), with yt-dlp as the fallback if ours doesn't find
+    anything. bot/fallback.py's generic OG/JSON-LD scrape also covers sites
+    with no dedicated extractor at all.
     """
     original_url = url
     is_yt_music = "music.youtube.com" in url.lower()
@@ -226,6 +234,55 @@ def resolve_media(
             cancel_check=cancel_check,
             display_title=display_title,
         )
+
+    # yt-dlp's hundreds of site extractors are best-maintained for YouTube;
+    # everywhere else (especially sites that change their player markup
+    # often, like adult sites), our own extractor in bot/fallback.py — kept
+    # up to date against this bot's actual traffic rather than yt-dlp's
+    # release cadence — gets tried FIRST, with yt-dlp as the fallback if it
+    # doesn't find anything. Skipped for YouTube itself, explicit quality
+    # picks (needs yt-dlp's format selection), audio-only requests, and
+    # internal ytsearch/scsearch queries — same guard already used above
+    # for the other own-resolver-first platforms (Spotify/Instagram/X/Pinterest).
+    own_extractor_already_tried = False
+    if (
+        not _is_youtube_url(url)
+        and not force_audio
+        and not quality_download
+        and not url.startswith(("ytsearch", "scsearch"))
+    ):
+        own_extractor_already_tried = True
+        own_job_id = uuid.uuid4().hex[:12]
+        own_dir = DOWNLOAD_DIR / own_job_id
+        own_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            from bot.fallback import fallback_resolve
+
+            result = fallback_resolve(
+                url,
+                own_dir,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
+            if result.file_path and not result.is_audio and not result.album:
+                result.file_path = _maybe_compress(
+                    result.file_path,
+                    is_audio=False,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                    source_url=url,
+                )
+                result.file_size = result.file_path.stat().st_size
+            return result
+        except DownloadCancelledError:
+            _cleanup_job_dir(own_dir)
+            raise
+        except FileTooLargeError:
+            _cleanup_job_dir(own_dir)
+            raise
+        except Exception as own_exc:
+            _cleanup_job_dir(own_dir)
+            logger.info("Own extractor found nothing for %s, trying yt-dlp: %s", url, own_exc)
 
     audio_preferred = force_audio or is_yt_music or _is_audio_url(url)
     job_id = uuid.uuid4().hex[:12]
@@ -398,67 +455,75 @@ def resolve_media(
                     )
                     raise yt_exc from exc
 
-        job_id = uuid.uuid4().hex[:12]
-        fallback_dir = DOWNLOAD_DIR / job_id
-        fallback_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            if progress_callback:
-                progress_callback("🔄 <b>Trying backup downloader…</b>")
-            from bot.fallback import fallback_resolve
+        # Already tried bot/fallback.py's own extractor before yt-dlp ran
+        # (the own-extractor-first pre-pass above) and it found nothing —
+        # retrying the exact same URL against the exact same extractor here
+        # would just fail again the same way, so skip straight to the
+        # remaining last-resort handling below instead of a wasted round-trip.
+        if own_extractor_already_tried:
+            logger.info("Skipping repeat own-extractor attempt for %s (already tried before yt-dlp)", url)
+        else:
+            job_id = uuid.uuid4().hex[:12]
+            fallback_dir = DOWNLOAD_DIR / job_id
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                if progress_callback:
+                    progress_callback("🔄 <b>Trying backup downloader…</b>")
+                from bot.fallback import fallback_resolve
 
-            result = fallback_resolve(
-                url,
-                fallback_dir,
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
-            )
-            if result.file_path and not result.is_audio and not result.album:
-                result.file_path = _maybe_compress(
-                    result.file_path,
-                    is_audio=False,
+                result = fallback_resolve(
+                    url,
+                    fallback_dir,
                     progress_callback=progress_callback,
                     cancel_check=cancel_check,
-                    source_url=url,
                 )
-                result.file_size = result.file_path.stat().st_size
-            return result
-        except Exception as fb_exc:
-            _cleanup_job_dir(fallback_dir)
-            logger.warning("Fallback failed for %s: %s", url, fb_exc)
+                if result.file_path and not result.is_audio and not result.album:
+                    result.file_path = _maybe_compress(
+                        result.file_path,
+                        is_audio=False,
+                        progress_callback=progress_callback,
+                        cancel_check=cancel_check,
+                        source_url=url,
+                    )
+                    result.file_size = result.file_path.stat().st_size
+                return result
+            except Exception as fb_exc:
+                _cleanup_job_dir(fallback_dir)
+                logger.warning("Fallback failed for %s: %s", url, fb_exc)
 
-            # Last resort for login-walled Instagram posts: a paid managed
-            # API (runs its own residential-proxy + account pool), tried only
-            # after every free path has failed.
-            if _is_instagram_url(url) and not force_audio:
-                from bot.hikerapi import hikerapi_configured, resolve_via_hikerapi
+        # Last resort for login-walled Instagram posts: a paid managed
+        # API (runs its own residential-proxy + account pool), tried only
+        # after every free path has failed.
+        if _is_instagram_url(url) and not force_audio:
+            from bot.hikerapi import hikerapi_configured, resolve_via_hikerapi
 
-                if hikerapi_configured():
-                    try:
-                        hiker_result = resolve_via_hikerapi(
-                            url,
-                            progress_callback=progress_callback,
-                            cancel_check=cancel_check,
-                        )
-                        if hiker_result:
-                            return hiker_result
-                    except Exception as hiker_exc:
-                        logger.warning("HikerAPI fallback failed for %s: %s", url, hiker_exc)
+            if hikerapi_configured():
+                try:
+                    hiker_result = resolve_via_hikerapi(
+                        url,
+                        progress_callback=progress_callback,
+                        cancel_check=cancel_check,
+                    )
+                    if hiker_result:
+                        return hiker_result
+                except Exception as hiker_exc:
+                    logger.warning("HikerAPI fallback failed for %s: %s", url, hiker_exc)
 
-            if is_youtube_bot_check(exc):
-                logger.warning(
-                    "YouTube bot-check (cookies=%s) for %s",
-                    get_cookies_file() or "none",
-                    url,
-                )
-                raise RuntimeError(youtube_bot_check_hint()) from exc
-            if _is_instagram_url(url) and is_instagram_login_required(exc):
-                logger.warning(
-                    "Instagram login wall (cookies=%s) for %s",
-                    get_cookies_file() or "none",
-                    url,
-                )
-                raise RuntimeError(instagram_login_hint()) from exc
-            raise exc
+        if is_youtube_bot_check(exc):
+            logger.warning(
+                "YouTube bot-check (cookies=%s) for %s",
+                get_cookies_file() or "none",
+                url,
+            )
+            raise RuntimeError(youtube_bot_check_hint()) from exc
+        if _is_instagram_url(url) and is_instagram_login_required(exc):
+            logger.warning(
+                "Instagram login wall (cookies=%s) for %s",
+                get_cookies_file() or "none",
+                url,
+            )
+            raise RuntimeError(instagram_login_hint()) from exc
+        raise exc
 
 
 def download_from_info(
