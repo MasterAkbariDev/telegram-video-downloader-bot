@@ -2,6 +2,26 @@
 
 All notable changes to this bot are documented here.
 
+## 1.9.1 — 2026-09-22
+
+### Fixed
+- **"Instagram login succeeded but produced no sessionid cookie."** Some
+  Bloks login responses hand back session state only through the
+  `IG-Set-Authorization` header, with no `Set-Cookie: sessionid` at all —
+  `instagrapi` correctly treats that as a successful login (its own API
+  calls authenticate fine via that header), but yt-dlp has no notion of
+  that custom Bearer scheme and needs an actual cookie. The session id is
+  embedded in that same authorization payload (it's exactly how
+  instagrapi's own `login_by_sessionid()` builds it), so `_save_session_and_cookies()`
+  now backfills it into the cookie jar whenever the jar itself came back
+  empty, instead of failing the login outright.
+
+### Changed
+- **Interactive login/signup UI**: the verification-code prompt, the "Got
+  it — resolving…" acknowledgement, and the final success/failure message
+  now all edit the *same* status message in place, instead of each being a
+  separate message the admin had to scroll back through to find the result.
+
 ## 1.9.0 — 2026-09-22
 
 ### Added

@@ -443,7 +443,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         admin_id = query.from_user.id
         status_msg = await query.message.reply_text("🔐 <b>Logging in…</b>", parse_mode=ParseMode.HTML)
         loop = asyncio.get_running_loop()
-        provider = _make_ig_code_provider(admin_id, context.bot, loop)
+        provider = _make_ig_code_provider(admin_id, context.bot, loop, status_msg)
         try:
             result = await asyncio.to_thread(interactive_login, account, provider)
             await status_msg.edit_text(
@@ -458,6 +458,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 parse_mode=ParseMode.HTML,
                 reply_markup=ig_account_detail_keyboard(username),
             )
+        finally:
+            _pending_ig_status_msg.pop(admin_id, None)
         return
 
     if data.startswith("admin:ig_acc_logout:"):
@@ -733,10 +735,21 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
 
-def _make_ig_code_provider(admin_id: int, bot, loop: asyncio.AbstractEventLoop):
+# admin_id -> (chat_id, message_id) of the one status message a login/signup
+# flow is currently editing in place — so the prompt, the "got it" ack, and
+# the final result all update the SAME message instead of scattering across
+# several, with the final edit landing on a message the admin has to scroll
+# back to find.
+_pending_ig_status_msg: dict[int, tuple[int, int]] = {}
+
+
+def _make_ig_code_provider(admin_id: int, bot, loop: asyncio.AbstractEventLoop, status_msg):
     """Bridge instagrapi's synchronous challenge_code_handler (called from a
     worker thread) to a Telegram prompt+reply, so an interactive login/signup
-    can ask the admin for a verification code mid-flow."""
+    can ask the admin for a verification code mid-flow. Edits `status_msg`
+    in place rather than sending a new message each time it's called (it can
+    be called more than once per login, e.g. a code then a birthdate)."""
+    _pending_ig_status_msg[admin_id] = (status_msg.chat_id, status_msg.message_id)
 
     def provider(username: str, choice=None) -> str:
         q: "_queue.Queue[str]" = _queue.Queue()
@@ -761,7 +774,13 @@ def _make_ig_code_provider(admin_id: int, bot, loop: asyncio.AbstractEventLoop):
             )
         try:
             fut = asyncio.run_coroutine_threadsafe(
-                bot.send_message(admin_id, text, parse_mode=ParseMode.HTML), loop
+                bot.edit_message_text(
+                    chat_id=status_msg.chat_id,
+                    message_id=status_msg.message_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                ),
+                loop,
             )
             fut.result(timeout=15)
         except Exception as exc:
@@ -788,6 +807,16 @@ async def admin_ig_code_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         return False
     text = (update.message.text or "").strip()
     q.put(text)
+    loc = _pending_ig_status_msg.get(user.id)
+    if loc:
+        chat_id, message_id = loc
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, text="⏳ Got it — resolving…"
+            )
+            return True
+        except Exception as exc:
+            logger.debug("Could not edit status message in place, falling back to a reply: %s", exc)
     await update.message.reply_text("⏳ Got it — resolving…")
     return True
 
@@ -975,7 +1004,7 @@ async def _admin_ig_signup_input(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode=ParseMode.HTML,
         )
         loop = asyncio.get_running_loop()
-        provider = _make_ig_code_provider(admin_id, context.bot, loop)
+        provider = _make_ig_code_provider(admin_id, context.bot, loop, status_msg)
         try:
             result = await asyncio.to_thread(
                 create_instagram_account,
@@ -997,6 +1026,8 @@ async def _admin_ig_signup_input(update: Update, context: ContextTypes.DEFAULT_T
                 parse_mode=ParseMode.HTML,
                 reply_markup=ig_accounts_menu_keyboard(),
             )
+        finally:
+            _pending_ig_status_msg.pop(admin_id, None)
         return True
 
     return False

@@ -726,11 +726,29 @@ def _resolve_youth_regulation_checkpoint(cl, account: dict, result: dict, code_p
 def _save_session_and_cookies(cl, account: dict) -> None:
     cookies_path, session_path = _account_paths(account["username"])
     session_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Newer Bloks login responses sometimes hand back session state only via
+    # the IG-Set-Authorization header (cl.authorization_data), with no
+    # sessionid Set-Cookie at all. bloks_apply_login_response() correctly
+    # treats that as a successful login on its own terms — the Authorization
+    # header alone is enough for cl's own API calls — but yt-dlp has no
+    # notion of instagrapi's custom Bearer scheme and needs an actual
+    # sessionid cookie to authenticate. The authorization payload itself
+    # carries that same sessionid value (it's how login_by_sessionid()
+    # constructs authorization_data in the first place), so backfill it into
+    # the cookie jar whenever the jar itself doesn't already have one.
+    sessionid = (cl.authorization_data or {}).get("sessionid")
+    if sessionid and not cl.private.cookies.get("sessionid"):
+        cl.private.cookies.set("sessionid", sessionid)
+
     cl.dump_settings(str(session_path))
     _write_cookies_from_jar(cookies_path, cl.private.cookies)
     if not _cookies_look_valid(cookies_path):
         raise RuntimeError(
-            "Instagram login succeeded but produced no sessionid cookie — unexpected."
+            "Instagram confirmed the login (authorization accepted) but gave "
+            "no sessionid anywhere in the response — yt-dlp needs that "
+            "specific cookie and there's nothing this bot can substitute. "
+            "This can happen right after a checkpoint; try 🔐 Login now again."
         )
     logger.info("Instagram cookies saved for %s to %s", account["username"], cookies_path)
 
