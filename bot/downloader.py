@@ -157,6 +157,11 @@ def resolve_media(
     url = _normalize_media_url(url)
     quality_download = max_height is not None
 
+    if _is_instagram_url(url):
+        from bot.instagram_auth import maybe_humanize_instagram_activity
+
+        maybe_humanize_instagram_activity(url)
+
     # Spotify is DRM in yt-dlp — resolve via SoundCloud / mirrors instead
     if (
         not force_audio

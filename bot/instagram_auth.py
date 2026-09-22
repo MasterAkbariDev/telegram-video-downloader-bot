@@ -833,3 +833,56 @@ def _write_mozilla_jar(path: Path, jar: MozillaCookieJar) -> None:
         out.set_cookie(cookie)
     out.save(ignore_discard=True, ignore_expires=True)
     tmp.replace(path)
+
+
+# A logged-in account that only ever silently fetches post data and never
+# does anything else a real person does (like, save, browse) is itself an
+# unusual, bot-shaped traffic pattern — independent of anything about the
+# login flow itself. Occasionally liking (often) and saving (rarely) the
+# post that was just fetched, through the same session, is cheap insurance
+# against that. "Often but not always" / "rarely" rather than fixed
+# thresholds, since a perfectly consistent rate is its own tell.
+_LIKE_PROBABILITY = 0.55
+_SAVE_PROBABILITY = 0.07
+
+
+def maybe_humanize_instagram_activity(url: str) -> None:
+    """Best-effort, fire-and-forget: occasionally like/save the post at
+    `url` using our own logged-in session, so the account's activity looks
+    like it belongs to someone actually using the app, not just a scraper.
+    No-op if we don't have a working login session. Never raises and never
+    blocks the caller — runs in a background thread, and every failure
+    (already liked, media now private, session hiccup, etc.) is swallowed;
+    none of this is allowed to affect the actual download.
+    """
+    import random
+
+    if not INSTAGRAM_SESSION_PATH.is_file():
+        return
+    do_like = random.random() < _LIKE_PROBABILITY
+    do_save = random.random() < _SAVE_PROBABILITY
+    if not do_like and not do_save:
+        return
+
+    def _run() -> None:
+        try:
+            cl = _build_client()
+            if not cl.user_id:
+                return
+            # A real person doesn't like/save the instant a post loads.
+            time.sleep(random.uniform(2.0, 9.0))
+            media_pk = cl.media_pk_from_url(url)
+            if do_like:
+                try:
+                    cl.media_like(media_pk)
+                except Exception as exc:
+                    logger.debug("Instagram auto-like skipped for %s: %s", url[:80], _safe_err(exc))
+            if do_save:
+                try:
+                    cl.media_save(media_pk)
+                except Exception as exc:
+                    logger.debug("Instagram auto-save skipped for %s: %s", url[:80], _safe_err(exc))
+        except Exception as exc:
+            logger.debug("Instagram humanize-activity skipped for %s: %s", url[:80], _safe_err(exc))
+
+    threading.Thread(target=_run, daemon=True, name="ig-humanize").start()

@@ -2,6 +2,22 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.29 — 2026-09-22
+
+### Added
+- **Occasional like/save on Instagram posts the bot fetches, using our own
+  logged-in session.** An account that only ever silently fetches post data
+  through the API and never does anything a real person does (like, save,
+  browse) is itself an unusual, bot-shaped traffic pattern, independent of
+  anything about the login flow. `maybe_humanize_instagram_activity()` in
+  `bot/instagram_auth.py` now fires (fire-and-forget, in a background
+  thread, with a 2–9s human-like delay) whenever an Instagram URL is
+  resolved: likes ~55% of the time, saves ~7% of the time — "often but not
+  always" for likes, "a lot less" for saves, deliberately not a fixed
+  rate. No-op when there's no working login session (nothing to act as).
+  Verified live: `media_pk_from_url()` + `media_like()` + `media_save()`
+  against a real post, both returned success.
+
 ## 1.8.28 — 2026-09-22
 
 ### Fixed
