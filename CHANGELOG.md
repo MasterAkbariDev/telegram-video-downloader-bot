@@ -2,6 +2,26 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.27 — 2026-09-22
+
+### Fixed
+- **Every two-step failure was misreported as "Instagram rejected that
+  verification code," even when no code was ever submitted.** The check
+  that was supposed to tell "didn't reach the code step" apart from "code
+  was wrong" tested for the substring `"code"` in the failure reason — but
+  every one of the "didn't reach it" reasons (`missing code_entry
+  context_data`, `missing code_entry_async context_data`) contains "code"
+  as part of a sub-step's own name, so the check always matched and always
+  blamed the code. Fixed: any non-empty reason now means "didn't reach
+  submission" (verified against both instagrapi's own resolver and
+  `_resolve_caa_two_step_verification` added in 1.8.26 — a wrong/expired
+  code always comes back with an *empty* reason instead, since submission
+  did happen in that case).
+- Logs the raw entrypoint response when Instagram doesn't offer a
+  code-entry step at all — this can mean the account is being routed to a
+  non-code verification method (e.g. in-app device approval) that isn't
+  modeled yet, which needs the raw response to diagnose further.
+
 ## 1.8.26 — 2026-09-22
 
 ### Fixed

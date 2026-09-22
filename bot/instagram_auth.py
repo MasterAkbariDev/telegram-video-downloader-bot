@@ -428,10 +428,18 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
             "Two-step verification for %s did not complete. reason=%r two_step=%s",
             username, reason, json.dumps(two_step, default=str)[:4000],
         )
-        if reason and "code" not in reason.lower():
-            # Failed before the code was ever submitted (e.g. a missing
-            # context_data at an earlier sub-step) — the code itself was
-            # never actually tested, so don't blame it.
+        if reason:
+            # A non-empty reason here is always one of the "missing X
+            # context_data" short-circuits (from both our own helper and
+            # instagrapi's own bloks_caa_resolve_two_step_verification) —
+            # meaning the flow never reached bloks_ap_two_step_verification_submit_code
+            # at all. A wrong/expired code always comes back with an EMPTY
+            # reason instead (submit happened, login just wasn't accepted).
+            # A previous version of this check tested for the substring
+            # "code" in `reason` to distinguish the two, but every one of
+            # these reasons contains "code" as part of a sub-step name
+            # (e.g. "missing code_entry context_data"), so it always matched
+            # and every failure here was misreported as a wrong code.
             raise RuntimeError(
                 f"Instagram's verification flow didn't reach the code-submission "
                 f"step ({reason}) — this isn't about whether the code was right. "
@@ -484,6 +492,13 @@ def _resolve_caa_two_step_verification(cl, username: str, send_result: dict, cod
 
     code_context = cl.bloks_extract_context_data(entry_result, AP_2SV_CODE_ENTRY)
     if not code_context:
+        logger.warning(
+            "Two-step entrypoint for %s didn't offer a code_entry step — "
+            "Instagram may be routing this account to a non-code verification "
+            "method (e.g. device/app approval) this bot doesn't model yet. "
+            "raw entrypoint response: %s",
+            username, json.dumps(entry_result, default=str)[:4000],
+        )
         return {"logged_in": False, "reason": "missing code_entry context_data"}
     # Instagram actually sends/dispatches the code as a side effect of this
     # call — only ask the human for it now.
