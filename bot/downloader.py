@@ -74,9 +74,21 @@ _DIRECT_URL_SKIP = (
 _INSTAGRAM_HOSTS = ("instagram.com", "instagr.am")
 _TIKTOK_HOSTS = ("tiktok.com",)
 
-_instagram_lock = threading.Lock()
-_instagram_ydl: yt_dlp.YoutubeDL | None = None
-_instagram_ydl_key: tuple | None = None
+# A single shared+cached YoutubeDL instance behind a mutex used to fully
+# serialize every Instagram extraction bot-wide — confirmed live in
+# production that this makes an innocent concurrent request queue up
+# behind an unrelated, unlucky one that hit a 429 and is sitting through
+# yt-dlp's own ~37s retry-with-backoff, even though the queued request's
+# own extraction takes under a second once unblocked. A small bounded
+# semaphore instead caps concurrency (avoids hammering Instagram with
+# unlimited parallel requests, which would itself invite more 429s) without
+# letting one slow request block everyone. Each concurrent call gets its
+# own fresh YoutubeDL instance (cheap, local, no network I/O) rather than
+# sharing one — sidesteps any question of whether concurrent
+# extract_info() calls on the same instance are actually safe.
+_INSTAGRAM_CONCURRENCY = 2
+_instagram_semaphore = threading.Semaphore(_INSTAGRAM_CONCURRENCY)
+_instagram_throttle_lock = threading.Lock()
 _last_instagram_request = 0.0
 
 _RETRY_DELAYS = (2, 5, 10, 20)
@@ -1155,21 +1167,19 @@ def _maybe_impersonate(opts: dict, url: str | None) -> None:
 
 
 def _instagram_throttle() -> None:
+    """Paces request *start* times at least INSTAGRAM_MIN_INTERVAL apart,
+    globally — independent of _instagram_semaphore, which caps how many
+    extractions may be in flight at once. Its own small lock (not the
+    semaphore) serializes just this timestamp check-and-sleep, so two
+    concurrent callers can't both read a stale _last_instagram_request and
+    both decide no wait is needed."""
     global _last_instagram_request
-    now = time.monotonic()
-    wait = INSTAGRAM_MIN_INTERVAL - (now - _last_instagram_request)
-    if wait > 0:
-        time.sleep(wait)
-    _last_instagram_request = time.monotonic()
-
-
-def _extract_cache_key(opts: dict) -> tuple:
-    return (
-        opts.get("format"),
-        opts.get("cookiefile"),
-        opts.get("proxy"),
-        str(opts.get("impersonate") or ""),
-    )
+    with _instagram_throttle_lock:
+        now = time.monotonic()
+        wait = INSTAGRAM_MIN_INTERVAL - (now - _last_instagram_request)
+        if wait > 0:
+            time.sleep(wait)
+        _last_instagram_request = time.monotonic()
 
 
 def _extract_info_with_retry(
@@ -1230,8 +1240,6 @@ def _instagram_extract(
     progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
 ) -> dict:
-    global _instagram_ydl, _instagram_ydl_key
-
     from bot.instagram_auth import ensure_instagram_cookies, refresh_instagram_cookies
 
     # Prefer auto-login cookies when INSTAGRAM_USERNAME/PASSWORD are set
@@ -1239,63 +1247,59 @@ def _instagram_extract(
     if ig_cookies:
         opts = {**opts, "cookiefile": ig_cookies}
 
-    key = _extract_cache_key(opts)
-    with _instagram_lock:
+    with _instagram_semaphore:
         _instagram_throttle()
+        ydl = yt_dlp.YoutubeDL(opts)
         try:
-            if _instagram_ydl is None or _instagram_ydl_key != key:
-                if _instagram_ydl is not None:
-                    _instagram_ydl.close()
-                _instagram_ydl = yt_dlp.YoutubeDL(opts)
-                _instagram_ydl_key = key
-            return _extract_info_with_retry(
-                _instagram_ydl,
-                url,
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
-            )
-        except DownloadError as exc:
-            if not is_instagram_login_required(exc):
-                raise
+            try:
+                return _extract_info_with_retry(
+                    ydl,
+                    url,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                )
+            except DownloadError as exc:
+                if not is_instagram_login_required(exc):
+                    raise
 
-            # "Instagram sent an empty media response" specifically is often
-            # a transient API hiccup, not a real login wall — confirmed live
-            # against a real post: a plain retry with the exact same (or no)
-            # cookies succeeded outright for content that a forced re-login
-            # then wrongly assumed needed authentication, burning ~40s on two
-            # doomed login attempts (and hammering whatever account happens
-            # to be configured, even when it isn't the actual problem) before
-            # giving up with a misleading "needs login" message. Try once
-            # more, cheaply, before escalating to that expensive path.
-            if "empty media response" in str(exc).lower():
-                try:
-                    time.sleep(2.0)
-                    return _extract_info_with_retry(
-                        _instagram_ydl,
-                        url,
-                        progress_callback=progress_callback,
-                        cancel_check=cancel_check,
-                    )
-                except DownloadError:
-                    pass  # genuinely needs the login escalation below
+                # "Instagram sent an empty media response" specifically is
+                # often a transient API hiccup, not a real login wall —
+                # confirmed live against a real post: a plain retry with the
+                # exact same (or no) cookies succeeded outright for content
+                # that a forced re-login then wrongly assumed needed
+                # authentication, burning ~40s on two doomed login attempts
+                # (and hammering whatever account happens to be configured,
+                # even when it isn't the actual problem) before giving up
+                # with a misleading "needs login" message. Try once more,
+                # cheaply, before escalating to that expensive path.
+                if "empty media response" in str(exc).lower():
+                    try:
+                        time.sleep(2.0)
+                        return _extract_info_with_retry(
+                            ydl,
+                            url,
+                            progress_callback=progress_callback,
+                            cancel_check=cancel_check,
+                        )
+                    except DownloadError:
+                        pass  # genuinely needs the login escalation below
 
-            # Session expired / login wall — refresh once and retry
-            logger.warning("Instagram auth failed — refreshing auto-login cookies")
-            refreshed = refresh_instagram_cookies()
-            if not refreshed:
-                raise
-            opts = {**opts, "cookiefile": refreshed}
-            key = _extract_cache_key(opts)
-            if _instagram_ydl is not None:
-                _instagram_ydl.close()
-            _instagram_ydl = yt_dlp.YoutubeDL(opts)
-            _instagram_ydl_key = key
-            return _extract_info_with_retry(
-                _instagram_ydl,
-                url,
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
-            )
+                # Session expired / login wall — refresh once and retry
+                logger.warning("Instagram auth failed — refreshing auto-login cookies")
+                refreshed = refresh_instagram_cookies()
+                if not refreshed:
+                    raise
+                opts = {**opts, "cookiefile": refreshed}
+                ydl.close()
+                ydl = yt_dlp.YoutubeDL(opts)
+                return _extract_info_with_retry(
+                    ydl,
+                    url,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                )
+        finally:
+            ydl.close()
 
 
 def _apply_network_opts(opts: dict) -> None:

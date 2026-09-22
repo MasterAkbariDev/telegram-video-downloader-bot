@@ -2,6 +2,30 @@
 
 All notable changes to this bot are documented here.
 
+## 1.11.5 — 2026-09-22
+
+### Changed
+- **Diagnosed live on production why two Instagram posts "took so long"**:
+  one genuinely hit Instagram's 429 rate limit and sat through yt-dlp's
+  own retry-with-backoff (2+5+10+20 ≈ 37s); the other was an innocent
+  bystander that queued up behind it — its own extraction took 0.8s once
+  unblocked. Two compounding causes, both addressed:
+  - `INSTAGRAM_MIN_INTERVAL` (pacing between Instagram extraction starts)
+    was 0.05s — confirmed too aggressive to reliably avoid 429s. Raised
+    default to 1.5s (still overridable via env).
+  - Every Instagram extraction bot-wide shared one mutex-guarded yt-dlp
+    instance, fully serializing them — a single slow/retrying request
+    stalled every other concurrent one behind it regardless of whether it
+    had anything to do with the first. Replaced with a bounded semaphore
+    (2 concurrent extractions — enough that one slow request can't block
+    everyone, not so many that it invites more 429s by hammering Instagram
+    in parallel) and a fresh per-call `YoutubeDL` instance instead of a
+    shared one (sidesteps any question of whether concurrent
+    `extract_info()` calls on the same instance are safe). The
+    request-start pacing itself remains global and correctly serialized
+    even with concurrent extractions in flight — verified with both a
+    true-parallelism test and a pacing-under-concurrency test.
+
 ## 1.11.4 — 2026-09-22
 
 ### Fixed

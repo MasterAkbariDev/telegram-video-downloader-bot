@@ -46,9 +46,13 @@ MAX_CONCURRENT_COMPRESSIONS = max(
 # Optional: Netscape cookies.txt for Instagram / login-required sites (see README)
 COOKIES_FILE = os.getenv("COOKIES_FILE", "").strip() or None
 YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip() or None
-# Lower than 2s so Instagram feels snappy; raise if you hit 429s
-# Polite delay between Instagram yt-dlp extracts (seconds)
-INSTAGRAM_MIN_INTERVAL = float(os.getenv("INSTAGRAM_MIN_INTERVAL", "0.05"))
+# Polite delay between Instagram yt-dlp extracts (seconds). Was 0.05s
+# (basically no pacing at all) — confirmed live in production logs that
+# this was frequent enough to draw a real 429 from Instagram, which then
+# costs a ~37s retry-with-backoff (2+5+10+20s) for that request AND (before
+# 1.11.5) stalled every other concurrent Instagram request behind it too.
+# Raise further if 429s are still showing up in the logs.
+INSTAGRAM_MIN_INTERVAL = float(os.getenv("INSTAGRAM_MIN_INTERVAL", "1.5"))
 # Optional Instagram auto-login (writes data/instagram_cookies.txt)
 INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "").strip() or None
 INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "").strip() or None
@@ -196,7 +200,7 @@ def reload_settings() -> None:
     MAX_VIDEO_HEIGHT = _MAX_HEIGHT.get(QUALITY, 480)
     COOKIES_FILE = os.getenv("COOKIES_FILE", "").strip() or None
     YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip() or None
-    INSTAGRAM_MIN_INTERVAL = float(os.getenv("INSTAGRAM_MIN_INTERVAL", "0.05"))
+    INSTAGRAM_MIN_INTERVAL = float(os.getenv("INSTAGRAM_MIN_INTERVAL", "1.5"))
     COMPRESS_TARGET_MB = float(os.getenv("COMPRESS_TARGET_MB", "25"))
     INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "").strip() or None
     INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "").strip() or None
