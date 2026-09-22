@@ -5,20 +5,29 @@ scraping the web login endpoint. This matters because Instagram's anti-abuse
 system evaluates a *device fingerprint* history, not just credentials — a
 fresh fingerprint on every run looks like a new phone signing in from a
 random IP every time, which is what a stateless web-login scrape does. A
-persisted device+session (data/instagram_session.json) makes repeat logins
-look like the same trusted phone returning, which is by far the single
-biggest factor in avoiding checkpoints/challenges.
+persisted device+session (data/instagram/<account>/session.json) makes
+repeat logins look like the same trusted phone returning, which is by far
+the single biggest factor in avoiding checkpoints/challenges.
 
 Even so, a login attempt that "looks risky" (datacenter IP, brand new
 fingerprint, etc.) can get a bad_password/UserInvalidCredentials response
 from Instagram EVEN WITH THE CORRECT PASSWORD — this is Instagram's risk
-system, not necessarily wrong credentials. See INSTAGRAM_PROXY below.
+system, not necessarily wrong credentials. See each account's "proxy" below.
+
+Multiple accounts: this module works in terms of an `account` dict
+(username/password/proxy/totp_secret/enabled), sourced from
+bot.config.get_instagram_accounts(). Every download/like/save/follow-request
+picks one (usually via pick_enabled_account(), a uniform-random choice)
+instead of there being one single configured account — see bot/config.py's
+INSTAGRAM_ACCOUNTS_FILE for storage and bot/downloader.py for where
+downloads pick an account.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -29,11 +38,6 @@ from typing import Callable
 from bot import config as cfg
 from bot.config import DATA_DIR, get_cookies_file
 
-# INSTAGRAM_USERNAME/PASSWORD/PROXY/TOTP_SECRET are read as cfg.X (not
-# imported by name) everywhere below — the admin panel can change them at
-# runtime via reload_settings(), and `from bot.config import X` would freeze
-# a stale copy in this module's namespace that never sees those updates.
-
 # (username, choice) -> verification code. `choice` is instagrapi's
 # CHOICE_EMAIL/CHOICE_SMS constant. Used to relay a code request out to
 # whoever is driving an interactive login/signup (e.g. the admin via Telegram).
@@ -41,104 +45,144 @@ CodeProvider = Callable[[str, object], str]
 
 logger = logging.getLogger(__name__)
 
-INSTAGRAM_COOKIES_PATH = DATA_DIR / "instagram_cookies.txt"
-INSTAGRAM_SESSION_PATH = DATA_DIR / "instagram_session.json"
+_INSTAGRAM_ACCOUNTS_DIR = DATA_DIR / "instagram"
 _LOGIN_LOCK = threading.Lock()
 _SESSION_MAX_AGE_SEC = 5 * 24 * 3600  # refresh every ~5 days
 _LOGIN_FAILURE_COOLDOWN_SEC = 30 * 60  # don't hammer Instagram after a failed login
-_last_login_failure_at = 0.0
 _INTERACTIVE_MIN_INTERVAL_SEC = 45  # guard against rapid re-taps of "Login now"
-_last_interactive_attempt_at = 0.0
+# Keyed by username — every account has its own independent cooldown state.
+_last_login_failure_at: dict[str, float] = {}
+_last_interactive_attempt_at: dict[str, float] = {}
 
 
 def instagram_credentials_configured() -> bool:
-    return bool(cfg.INSTAGRAM_USERNAME and cfg.INSTAGRAM_PASSWORD)
+    return bool(cfg.get_instagram_accounts())
 
 
-def ensure_instagram_cookies(*, force_refresh: bool = False) -> str | None:
+def pick_enabled_account() -> dict | None:
+    """Uniform-random choice among enabled configured accounts, or None if
+    nothing is configured/enabled — every download/like/save/follow-request
+    that doesn't care which specific account handles it goes through this."""
+    accounts = [a for a in cfg.get_instagram_accounts() if a.get("enabled", True)]
+    if not accounts:
+        return None
+    return random.choice(accounts)
+
+
+def _account_slug(username: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", username) or "account"
+
+
+def _account_paths(username: str) -> tuple[Path, Path]:
+    """(cookies_path, session_path) for one account, migrating the old
+    pre-multi-account single data/instagram_cookies.txt / instagram_session.json
+    into this account's own directory the first time they're needed, if
+    present — so upgrading doesn't silently lose an existing working login."""
+    account_dir = _INSTAGRAM_ACCOUNTS_DIR / _account_slug(username)
+    account_dir.mkdir(parents=True, exist_ok=True)
+    cookies_path = account_dir / "cookies.txt"
+    session_path = account_dir / "session.json"
+
+    legacy_cookies = DATA_DIR / "instagram_cookies.txt"
+    legacy_session = DATA_DIR / "instagram_session.json"
+    if legacy_session.is_file() and not session_path.is_file():
+        legacy_session.replace(session_path)
+    if legacy_cookies.is_file() and not cookies_path.is_file():
+        legacy_cookies.replace(cookies_path)
+
+    return cookies_path, session_path
+
+
+def ensure_instagram_cookies(account: dict | None = None, *, force_refresh: bool = False) -> str | None:
     """
     Return a cookies file path usable by yt-dlp for Instagram.
 
     Priority:
-    1. data/instagram_cookies.txt — either uploaded manually via the admin
-       panel (📸 Instagram cookies), or written by auto-login below. Manually
-       uploaded cookies never expire on their own (we can't refresh them
-       ourselves) and are always preferred while they still look valid.
-    2. Auto-login via INSTAGRAM_USERNAME/PASSWORD, if configured — refreshed
-       every ~5 days or when the caller forces it.
+    1. This account's own cookies.txt — either uploaded manually via the
+       admin panel, or written by auto-login below. Manually uploaded
+       cookies never expire on their own (we can't refresh them ourselves)
+       and are always preferred while they still look valid.
+    2. Auto-login with this account's credentials — refreshed every ~5 days
+       or when the caller forces it.
     3. COOKIES_FILE / data/cookies.txt.
+
+    `account` defaults to a random enabled configured account
+    (pick_enabled_account()) when omitted — this is how downloads rotate
+    across multiple accounts without every caller needing to pick one.
     """
-    global _last_login_failure_at
-    creds_ok = instagram_credentials_configured()
+    if account is None:
+        account = pick_enabled_account()
+    if account is None:
+        return get_cookies_file()
+
+    username = account["username"]
+    cookies_path, _session_path = _account_paths(username)
 
     with _LOGIN_LOCK:
-        if not force_refresh and _cookies_look_valid(INSTAGRAM_COOKIES_PATH):
-            if not creds_ok or _cookies_fresh(INSTAGRAM_COOKIES_PATH):
-                return str(INSTAGRAM_COOKIES_PATH)
-
-        if not creds_ok:
-            if INSTAGRAM_COOKIES_PATH.is_file():
-                return str(INSTAGRAM_COOKIES_PATH)
-            return get_cookies_file()
+        if not force_refresh and _cookies_look_valid(cookies_path) and _cookies_fresh(cookies_path):
+            return str(cookies_path)
 
         # A login just failed (e.g. bad credentials / checkpoint) — retrying on
         # every single request wastes a full HTTP round-trip per download and
         # visibly slows the bot down. Back off until the cooldown expires.
-        if (
-            not force_refresh
-            and _last_login_failure_at
-            and time.time() - _last_login_failure_at < _LOGIN_FAILURE_COOLDOWN_SEC
-        ):
-            if INSTAGRAM_COOKIES_PATH.is_file():
-                return str(INSTAGRAM_COOKIES_PATH)
+        last_failure = _last_login_failure_at.get(username, 0.0)
+        if not force_refresh and last_failure and time.time() - last_failure < _LOGIN_FAILURE_COOLDOWN_SEC:
+            if cookies_path.is_file():
+                return str(cookies_path)
             return get_cookies_file()
 
         try:
-            _login_and_save(INSTAGRAM_COOKIES_PATH)
-            _last_login_failure_at = 0.0
-            return str(INSTAGRAM_COOKIES_PATH)
+            _login_and_save(account)
+            _last_login_failure_at.pop(username, None)
+            return str(cookies_path)
         except Exception as exc:
-            _last_login_failure_at = time.time()
-            logger.error("Instagram auto-login failed: %s", _safe_err(exc))
+            _last_login_failure_at[username] = time.time()
+            logger.error("Instagram auto-login failed for %s: %s", username, _safe_err(exc, account))
             # Keep previous cookies if still present
-            if INSTAGRAM_COOKIES_PATH.is_file():
-                return str(INSTAGRAM_COOKIES_PATH)
+            if cookies_path.is_file():
+                return str(cookies_path)
             return get_cookies_file()
 
 
-def instagram_cookies_status() -> dict:
-    """Status for the admin panel: whether cookies exist, look valid, and age."""
-    path = INSTAGRAM_COOKIES_PATH
-    exists = path.is_file()
-    valid = _cookies_look_valid(path) if exists else False
+def instagram_cookies_status(account: dict) -> dict:
+    """Status for the admin panel: whether this account's cookies exist, look valid, and age."""
+    username = account["username"]
+    cookies_path, session_path = _account_paths(username)
+    exists = cookies_path.is_file()
+    valid = _cookies_look_valid(cookies_path) if exists else False
     age_days: float | None = None
     if exists:
         try:
-            age_days = (time.time() - path.stat().st_mtime) / 86400
+            age_days = (time.time() - cookies_path.stat().st_mtime) / 86400
         except OSError:
             age_days = None
+    last_failure = _last_login_failure_at.get(username, 0.0)
     return {
+        "username": username,
         "exists": exists,
         "valid": valid,
         "age_days": age_days,
-        "auto_login_configured": instagram_credentials_configured(),
-        "session_saved": INSTAGRAM_SESSION_PATH.is_file(),
-        "username": cfg.INSTAGRAM_USERNAME,
-        "proxy_configured": bool(cfg.INSTAGRAM_PROXY or cfg.YTDLP_PROXY),
-        "totp_configured": bool(cfg.INSTAGRAM_TOTP_SECRET),
-        "cooldown_remaining_sec": max(
-            0.0, _LOGIN_FAILURE_COOLDOWN_SEC - (time.time() - _last_login_failure_at)
-        )
-        if _last_login_failure_at
+        "session_saved": session_path.is_file(),
+        "proxy_configured": bool(account.get("proxy") or cfg.YTDLP_PROXY),
+        "totp_configured": bool(account.get("totp_secret")),
+        "enabled": account.get("enabled", True),
+        "cooldown_remaining_sec": max(0.0, _LOGIN_FAILURE_COOLDOWN_SEC - (time.time() - last_failure))
+        if last_failure
         else 0.0,
     }
 
 
-def save_uploaded_instagram_cookies(raw_bytes: bytes) -> None:
-    """Save an admin-uploaded cookies.txt — raises ValueError if it doesn't look valid."""
+def list_instagram_accounts_status() -> list[dict]:
+    """Status for every configured account — backs the admin Instagram-accounts screen."""
+    return [instagram_cookies_status(account) for account in cfg.get_instagram_accounts()]
+
+
+def save_uploaded_instagram_cookies(username: str, raw_bytes: bytes) -> None:
+    """Save an admin-uploaded cookies.txt for one account — raises ValueError if invalid."""
     from bot.config import cookies_file_looks_valid
 
-    tmp = INSTAGRAM_COOKIES_PATH.with_suffix(".tmp")
+    cookies_path, _session_path = _account_paths(username)
+    tmp = cookies_path.with_suffix(".tmp")
     try:
         text = raw_bytes.decode("utf-8", errors="ignore")
     except Exception as exc:
@@ -151,14 +195,14 @@ def save_uploaded_instagram_cookies(raw_bytes: bytes) -> None:
             raise ValueError("Does not look like a Netscape cookies.txt file")
         if not _cookies_look_valid(tmp):
             raise ValueError("No 'sessionid' cookie found — export while logged into Instagram")
-        tmp.replace(INSTAGRAM_COOKIES_PATH)
+        tmp.replace(cookies_path)
     finally:
         tmp.unlink(missing_ok=True)
 
 
-def refresh_instagram_cookies() -> str | None:
+def refresh_instagram_cookies(account: dict | None = None) -> str | None:
     """Force a new login (e.g. after empty-media / login-wall errors)."""
-    return ensure_instagram_cookies(force_refresh=True)
+    return ensure_instagram_cookies(account, force_refresh=True)
 
 
 def _cookies_fresh(path: Path) -> bool:
@@ -180,10 +224,10 @@ def _cookies_look_valid(path: Path) -> bool:
     return bool(re.search(r"(^|\t)sessionid\t", text, re.M))
 
 
-def _safe_err(exc: BaseException) -> str:
+def _safe_err(exc: BaseException, account: dict | None = None) -> str:
     """Never echo password material from exception text."""
     text = str(exc)
-    password = cfg.INSTAGRAM_PASSWORD
+    password = (account or {}).get("password")
     if password and password in text:
         text = text.replace(password, "***")
     return text[:400]
@@ -233,12 +277,10 @@ def _pick_device_profile(seed: str) -> dict:
     """Deterministic per-account choice — the same account always gets the
     same profile across restarts (consistency matters for trust), but
     different accounts get different ones (no shared fingerprint)."""
-    import random
-
     return dict(random.Random(seed).choice(_DEVICE_PROFILES))
 
 
-def _build_client(seed: str | None = None):
+def _build_client(account: dict, *, seed: str | None = None):
     try:
         from instagrapi import Client
     except ImportError as exc:
@@ -252,35 +294,38 @@ def _build_client(seed: str | None = None):
     # Reuse the saved device fingerprint + session so repeat logins look like
     # the same trusted phone returning, not a brand-new device every time —
     # this alone avoids most checkpoint/challenge triggers.
-    if INSTAGRAM_SESSION_PATH.is_file():
+    _cookies_path, session_path = _account_paths(account["username"])
+    if session_path.is_file():
         try:
-            cl.load_settings(str(INSTAGRAM_SESSION_PATH), override_app_version=True)
+            cl.load_settings(str(session_path), override_app_version=True)
         except Exception as exc:
             logger.warning(
-                "Could not load saved Instagram session (%s) — starting fresh", exc
+                "Could not load saved Instagram session for %s (%s) — starting fresh",
+                account["username"], exc,
             )
     elif seed:
         cl.set_device(_pick_device_profile(seed))
 
-    proxy = cfg.INSTAGRAM_PROXY or cfg.YTDLP_PROXY
+    proxy = account.get("proxy") or cfg.YTDLP_PROXY
     if proxy:
         cl.set_proxy(proxy)
     return cl
 
 
-def _totp_code() -> str:
-    if not cfg.INSTAGRAM_TOTP_SECRET:
+def _totp_code(account: dict) -> str:
+    secret = account.get("totp_secret")
+    if not secret:
         return ""
     try:
         import pyotp
     except ImportError as exc:
         raise RuntimeError(
-            "pyotp is required for INSTAGRAM_TOTP_SECRET (pip install pyotp)"
+            "pyotp is required for a TOTP secret (pip install pyotp)"
         ) from exc
-    return pyotp.TOTP(cfg.INSTAGRAM_TOTP_SECRET).now()
+    return pyotp.TOTP(secret).now()
 
 
-def _perform_login(cl, username: str, password: str, *, code_provider: CodeProvider | None) -> None:
+def _perform_login(cl, account: dict, *, code_provider: CodeProvider | None) -> None:
     """Log `cl` in. With code_provider set, a 2FA/verification code, a
     checkpoint challenge, or Meta's age/"youth regulation" confirmation step
     is resolved interactively — the provider is asked live, and whatever it
@@ -289,12 +334,12 @@ def _perform_login(cl, username: str, password: str, *, code_provider: CodeProvi
     person answers it, the same way tapping through them in the app would."""
     if code_provider is not None:
         cl.challenge_code_handler = code_provider
-        _perform_login_interactive(cl, username, password, code_provider)
+        _perform_login_interactive(cl, account, code_provider)
         return
-    _perform_login_noninteractive(cl, username, password)
+    _perform_login_noninteractive(cl, account)
 
 
-def _perform_login_noninteractive(cl, username: str, password: str) -> None:
+def _perform_login_noninteractive(cl, account: dict) -> None:
     from instagrapi.exceptions import (
         BadPassword,
         ChallengeRequired,
@@ -302,15 +347,17 @@ def _perform_login_noninteractive(cl, username: str, password: str) -> None:
         TwoFactorRequired,
     )
 
-    verification_code = _totp_code()
+    username = account["username"]
+    password = account.get("password") or ""
+    verification_code = _totp_code(account)
     try:
         cl.login(username, password, verification_code=verification_code)
     except TwoFactorRequired as exc:
         raise RuntimeError(
             "Instagram requires a verification code (emailed, texted, or "
-            "from an authenticator app). Set INSTAGRAM_TOTP_SECRET for "
-            "automated authenticator-app 2FA, or use /admin → Instagram → "
-            "🔐 Login now to enter an emailed/SMS code interactively."
+            "from an authenticator app). Set a TOTP secret for automated "
+            "authenticator-app 2FA, or use /admin → Instagram → 🔐 Login now "
+            "to enter an emailed/SMS code interactively."
         ) from exc
     except ChallengeRequired as exc:
         raise RuntimeError(
@@ -325,8 +372,8 @@ def _perform_login_noninteractive(cl, username: str, password: str) -> None:
             "Instagram rejected this login. This is usually NOT actually a "
             "wrong password — Instagram's risk system flags logins from "
             "server/datacenter IPs and fresh device fingerprints even with "
-            "correct credentials. Set INSTAGRAM_PROXY to a residential/mobile "
-            "proxy (most effective fix), or use /admin → Instagram cookies "
+            "correct credentials. Set a residential/mobile proxy for this "
+            "account (most effective fix), or use /admin → Instagram cookies "
             "to upload a cookies.txt exported from a real browser session "
             "instead of automated login."
         ) from exc
@@ -337,7 +384,7 @@ def _perform_login_noninteractive(cl, username: str, password: str) -> None:
         ) from exc
 
 
-def _perform_login_interactive(cl, username: str, password: str, code_provider: CodeProvider) -> None:
+def _perform_login_interactive(cl, account: dict, code_provider: CodeProvider) -> None:
     """Step through the CAA login manually (rather than cl.login()) so we can
     see — and interactively resolve — a "youth regulation" age-confirmation
     checkpoint before instagrapi's own fallback path turns it into a generic,
@@ -353,6 +400,9 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
         PleaseWaitFewMinutes,
         TwoFactorRequired,
     )
+
+    username = account["username"]
+    password = account.get("password") or ""
 
     # cl.login() itself skips straight to a validity check (account_info())
     # when a previously saved session is already loaded, and only falls back
@@ -386,7 +436,7 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
             raise RuntimeError("Instagram's verification challenge was not resolved.") from exc
         return
     except TwoFactorRequired as exc:
-        code = _totp_code() or (
+        code = _totp_code(account) or (
             code_provider(
                 username, "the verification code Instagram just sent (email, SMS, or authenticator app)"
             )
@@ -402,8 +452,8 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
             "Instagram rejected this login. This is usually NOT actually a "
             "wrong password — Instagram's risk system flags logins from "
             "server/datacenter IPs and fresh device fingerprints even with "
-            "correct credentials. Set INSTAGRAM_PROXY to a residential/mobile "
-            "proxy (most effective fix), or upload a cookies.txt exported "
+            "correct credentials. Set a residential/mobile proxy for this "
+            "account (most effective fix), or upload a cookies.txt exported "
             "from a real browser session instead of automated login."
         ) from exc
     except PleaseWaitFewMinutes as exc:
@@ -416,7 +466,7 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
         return  # logged in on the first pass, nothing more to do
 
     if cl.bloks_caa_login_needs_two_step(result):
-        totp = _totp_code()
+        totp = _totp_code(account)
         if totp:
             two_step = cl.bloks_caa_resolve_two_step_verification(result, verification_code=totp)
         else:
@@ -435,11 +485,6 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
             # meaning the flow never reached bloks_ap_two_step_verification_submit_code
             # at all. A wrong/expired code always comes back with an EMPTY
             # reason instead (submit happened, login just wasn't accepted).
-            # A previous version of this check tested for the substring
-            # "code" in `reason` to distinguish the two, but every one of
-            # these reasons contains "code" as part of a sub-step name
-            # (e.g. "missing code_entry context_data"), so it always matched
-            # and every failure here was misreported as a wrong code.
             raise RuntimeError(
                 f"Instagram's verification flow didn't reach the code-submission "
                 f"step ({reason}) — this isn't about whether the code was right. "
@@ -452,7 +497,7 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
     # payload we have here — passing it unwrapped silently yields [] every time.
     markers = cl._caa_result_action_markers({"result": result})
     if any("YOUTH_REGULATION" in marker for marker in markers):
-        _resolve_youth_regulation_checkpoint(cl, username, password, result, code_provider)
+        _resolve_youth_regulation_checkpoint(cl, account, result, code_provider)
         return
     if any(marker.startswith("CAA_LOGIN_FALLBACK:") for marker in markers):
         raise RuntimeError(
@@ -594,11 +639,13 @@ def _parse_birthday(text: str) -> str:
     raise ValueError(f"Could not parse {text!r} as a date")
 
 
-def _resolve_youth_regulation_checkpoint(cl, username: str, password: str, result: dict, code_provider: CodeProvider) -> None:
+def _resolve_youth_regulation_checkpoint(cl, account: dict, result: dict, code_provider: CodeProvider) -> None:
     """Meta's age/"youth regulation" check on a first-time device. Ask the
     account holder to confirm their own birthdate live, in chat — never
     supplied or guessed by this code — then submit exactly what they say and
     retry the login once."""
+    username = account["username"]
+    password = account.get("password") or ""
     raw_birthday = (
         code_provider(
             username,
@@ -676,88 +723,92 @@ def _resolve_youth_regulation_checkpoint(cl, username: str, password: str, resul
     )
 
 
-def _save_session_and_cookies(cl, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    INSTAGRAM_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
-    cl.dump_settings(str(INSTAGRAM_SESSION_PATH))
-    _write_cookies_from_jar(path, cl.private.cookies)
-    if not _cookies_look_valid(path):
+def _save_session_and_cookies(cl, account: dict) -> None:
+    cookies_path, session_path = _account_paths(account["username"])
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    cl.dump_settings(str(session_path))
+    _write_cookies_from_jar(cookies_path, cl.private.cookies)
+    if not _cookies_look_valid(cookies_path):
         raise RuntimeError(
             "Instagram login succeeded but produced no sessionid cookie — unexpected."
         )
-    logger.info("Instagram cookies saved to %s", path)
+    logger.info("Instagram cookies saved for %s to %s", account["username"], cookies_path)
 
 
-def _login_and_save(path: Path) -> None:
+def _login_and_save(account: dict) -> None:
     """Non-interactive login used by the passive ensure_instagram_cookies() path
     (triggered by ordinary download requests) — must never block on a human."""
-    username = cfg.INSTAGRAM_USERNAME or ""
-    password = cfg.INSTAGRAM_PASSWORD or ""
+    username = account["username"]
+    password = account.get("password") or ""
     if not username or not password:
-        raise RuntimeError("INSTAGRAM_USERNAME / INSTAGRAM_PASSWORD not set")
+        raise RuntimeError(f"Account {username} is missing a password")
 
     logger.info("Instagram auto-login as %s…", username)
-    cl = _build_client(seed=username)
-    _perform_login(cl, username, password, code_provider=None)
-    _save_session_and_cookies(cl, path)
+    cl = _build_client(account, seed=username)
+    _perform_login(cl, account, code_provider=None)
+    _save_session_and_cookies(cl, account)
 
 
-def interactive_login(code_provider: CodeProvider) -> dict:
+def interactive_login(account: dict, code_provider: CodeProvider) -> dict:
     """Admin-triggered login (e.g. /admin → Instagram → 🔐 Login now).
 
     Unlike the passive path, this resolves checkpoint challenges by asking
     code_provider(username, choice) for the code Instagram just sent —
     typically wired up to prompt the admin over Telegram and wait for a reply.
     """
-    username = cfg.INSTAGRAM_USERNAME or ""
-    password = cfg.INSTAGRAM_PASSWORD or ""
+    username = account["username"]
+    password = account.get("password") or ""
     if not username or not password:
-        raise RuntimeError("INSTAGRAM_USERNAME / INSTAGRAM_PASSWORD not set")
+        raise RuntimeError(f"Account {username} is missing a password")
 
-    global _last_login_failure_at, _last_interactive_attempt_at
     with _LOGIN_LOCK:
         # Every failed retry so far has been a brand-new password-based login
         # attempt against Instagram's fraud/abuse system — rapid back-to-back
         # taps of "Login now" (including while debugging) is itself a pattern
         # that gets an account challenged more, independent of anything else
         # about the request. Force a minimum gap between attempts.
-        wait_left = _INTERACTIVE_MIN_INTERVAL_SEC - (time.time() - _last_interactive_attempt_at)
+        last_attempt = _last_interactive_attempt_at.get(username, 0.0)
+        wait_left = _INTERACTIVE_MIN_INTERVAL_SEC - (time.time() - last_attempt)
         if wait_left > 0:
             raise RuntimeError(
                 f"Please wait {wait_left:.0f}s before trying again — retrying "
                 "instantly makes Instagram's abuse detection more suspicious, "
                 "not less."
             )
-        _last_interactive_attempt_at = time.time()
+        _last_interactive_attempt_at[username] = time.time()
 
         logger.info("Instagram interactive login as %s…", username)
-        cl = _build_client(seed=username)
+        cl = _build_client(account, seed=username)
         try:
-            _perform_login(cl, username, password, code_provider=code_provider)
-            _save_session_and_cookies(cl, INSTAGRAM_COOKIES_PATH)
+            _perform_login(cl, account, code_provider=code_provider)
+            _save_session_and_cookies(cl, account)
         except Exception:
-            _last_login_failure_at = time.time()
+            _last_login_failure_at[username] = time.time()
             raise
-        _last_login_failure_at = 0.0
+        _last_login_failure_at.pop(username, None)
         return {"username": username}
 
 
-def logout_instagram() -> None:
+def logout_instagram(account: dict) -> None:
     """Best-effort remote logout (invalidates the session server-side), then
     always clears local session/cookie files regardless of whether that
     succeeded (e.g. no network, or nothing to invalidate)."""
-    if INSTAGRAM_SESSION_PATH.is_file():
+    username = account["username"]
+    cookies_path, session_path = _account_paths(username)
+    if session_path.is_file():
         try:
-            cl = _build_client()
+            cl = _build_client(account)
             if cl.user_id:
                 cl.logout()
         except Exception as exc:
-            logger.warning("Instagram remote logout failed (clearing local session anyway): %s", exc)
+            logger.warning(
+                "Instagram remote logout failed for %s (clearing local session anyway): %s",
+                username, exc,
+            )
 
-    INSTAGRAM_COOKIES_PATH.unlink(missing_ok=True)
-    INSTAGRAM_SESSION_PATH.unlink(missing_ok=True)
-    global _last_login_failure_at
-    _last_login_failure_at = 0.0
+    cookies_path.unlink(missing_ok=True)
+    session_path.unlink(missing_ok=True)
+    _last_login_failure_at.pop(username, None)
 
 
 def create_instagram_account(
@@ -767,8 +818,11 @@ def create_instagram_account(
     password: str,
     email: str,
     full_name: str = "",
+    proxy: str | None = None,
+    totp_secret: str | None = None,
 ) -> dict:
-    """Create a new Instagram account via email verification.
+    """Create a new Instagram account via email verification, then register
+    it as one more account in the rotation pool (bot.config.add_instagram_account).
 
     code_provider(username, choice) is asked for the email confirmation code
     Instagram sends — wire it up to prompt a human (e.g. the admin over
@@ -776,9 +830,17 @@ def create_instagram_account(
     guaranteed: Instagram may still require a phone number or a captcha that
     this flow cannot solve, especially from a datacenter IP.
     """
-    cl = _build_client(seed=username)
+    account = {
+        "username": username,
+        "password": password,
+        "proxy": proxy,
+        "totp_secret": totp_secret,
+        "enabled": True,
+    }
+    cl = _build_client(account, seed=username)
     cl.challenge_code_handler = code_provider
     user = cl.signup_caa_email(username, password, email, full_name=full_name, attempts=6, wait_seconds=20)
+    account["username"] = user.username  # in case Instagram normalized it
 
     # signup_caa_email() only extracts the created user's metadata — it never
     # calls the same session-establishing step a login does, so cl.private
@@ -788,8 +850,9 @@ def create_instagram_account(
     # brand-new account should already have its age-verification flag set
     # from creation, so this is expected to clear without hitting the same
     # checkpoint an existing, never-verified-on-this-device account does.
-    _perform_login_interactive(cl, user.username, password, code_provider)
-    _save_session_and_cookies(cl, INSTAGRAM_COOKIES_PATH)
+    _perform_login_interactive(cl, account, code_provider)
+    _save_session_and_cookies(cl, account)
+    cfg.add_instagram_account(account["username"], password, proxy=proxy, totp_secret=totp_secret)
     return {"username": user.username, "user_id": str(user.pk)}
 
 
@@ -846,18 +909,25 @@ _LIKE_PROBABILITY = 0.55
 _SAVE_PROBABILITY = 0.07
 
 
-def maybe_humanize_instagram_activity(url: str) -> None:
+def maybe_humanize_instagram_activity(url: str, account: dict | None = None) -> None:
     """Best-effort, fire-and-forget: occasionally like/save the post at
-    `url` using our own logged-in session, so the account's activity looks
-    like it belongs to someone actually using the app, not just a scraper.
-    No-op if we don't have a working login session. Never raises and never
-    blocks the caller — runs in a background thread, and every failure
-    (already liked, media now private, session hiccup, etc.) is swallowed;
-    none of this is allowed to affect the actual download.
+    `url` using a logged-in session, so that account's activity looks like
+    it belongs to someone actually using the app, not just a scraper.
+    `account` defaults to a random enabled account when omitted — it does
+    NOT need to be the same account that actually fetched the post; what
+    matters is each account showing a normal mix of activity over time, not
+    that any one post's fetch and like/save came from the same session.
+    No-op if there's no working login session for the chosen account. Never
+    raises and never blocks the caller — runs in a background thread, and
+    every failure (already liked, media now private, session hiccup, etc.)
+    is swallowed; none of this is allowed to affect the actual download.
     """
-    import random
-
-    if not INSTAGRAM_SESSION_PATH.is_file():
+    if account is None:
+        account = pick_enabled_account()
+    if account is None:
+        return
+    _cookies_path, session_path = _account_paths(account["username"])
+    if not session_path.is_file():
         return
     do_like = random.random() < _LIKE_PROBABILITY
     do_save = random.random() < _SAVE_PROBABILITY
@@ -866,7 +936,7 @@ def maybe_humanize_instagram_activity(url: str) -> None:
 
     def _run() -> None:
         try:
-            cl = _build_client()
+            cl = _build_client(account)
             if not cl.user_id:
                 return
             # A real person doesn't like/save the instant a post loads.
@@ -875,14 +945,25 @@ def maybe_humanize_instagram_activity(url: str) -> None:
             if do_like:
                 try:
                     cl.media_like(media_pk)
+                    _record_instagram_action(account["username"], "like", media_pk, url)
                 except Exception as exc:
-                    logger.debug("Instagram auto-like skipped for %s: %s", url[:80], _safe_err(exc))
+                    logger.debug("Instagram auto-like skipped for %s: %s", url[:80], _safe_err(exc, account))
             if do_save:
                 try:
                     cl.media_save(media_pk)
+                    _record_instagram_action(account["username"], "save", media_pk, url)
                 except Exception as exc:
-                    logger.debug("Instagram auto-save skipped for %s: %s", url[:80], _safe_err(exc))
+                    logger.debug("Instagram auto-save skipped for %s: %s", url[:80], _safe_err(exc, account))
         except Exception as exc:
-            logger.debug("Instagram humanize-activity skipped for %s: %s", url[:80], _safe_err(exc))
+            logger.debug("Instagram humanize-activity skipped for %s: %s", url[:80], _safe_err(exc, account))
 
     threading.Thread(target=_run, daemon=True, name="ig-humanize").start()
+
+
+def _record_instagram_action(username: str, action: str, media_pk, url: str) -> None:
+    try:
+        from bot.stats import record_instagram_action
+
+        record_instagram_action(username, action, str(media_pk), url)
+    except Exception as exc:
+        logger.debug("Could not record Instagram %s action for stats: %s", action, exc)

@@ -1281,7 +1281,7 @@ def instagram_login_hint() -> str:
         )
     return (
         "Instagram blocked anonymous access for this post. "
-        "Set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD in .env for auto-login, "
+        "Add an Instagram account in /admin → Instagram Accounts for auto-login, "
         "export cookies to <code>data/cookies.txt</code>, or set HIKERAPI_KEY "
         "for a managed API fallback (see README)."
     )

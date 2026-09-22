@@ -109,6 +109,70 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("Nothing in progress to cancel.")
 
 
+async def _require_group_admin(update: Update) -> bool:
+    """True if this is a group/supergroup and the invoking user is an admin/owner of it."""
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user:
+        return False
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await update.message.reply_text("This only applies inside groups.")
+        return False
+    member = await chat.get_member(user.id)
+    if member.status not in ("administrator", "creator"):
+        await update.message.reply_text("Only this group's admins can do that.")
+        return False
+    return True
+
+
+async def disablebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_group_admin(update):
+        return
+    stats.set_group_enabled(update.effective_chat.id, False)
+    await update.message.reply_text(
+        "🔕 Downloading disabled in this group. An admin can re-enable it with /enablebot."
+    )
+
+
+async def enablebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_group_admin(update):
+        return
+    stats.set_group_enabled(update.effective_chat.id, True)
+    await update.message.reply_text("🔔 Downloading re-enabled in this group.")
+
+
+async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/request <username_or_id> — send a follow request to a private Instagram
+    account from one of the bot's own accounts; the requester is told here
+    once Instagram actually accepts or declines it."""
+    from bot.follow_requests import send_follow_request
+
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat:
+        return
+    target = " ".join(context.args).strip() if context.args else ""
+    if not target:
+        await update.message.reply_text(
+            "Usage: <code>/request username_or_id</code> — sends a follow request "
+            "to that Instagram account and lets you know here once it's accepted or declined.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    result = await asyncio.to_thread(send_follow_request, user.id, chat.id, target)
+    status = result["status"]
+    if status == "error":
+        await update.message.reply_text(f"❌ {result['detail']}")
+    elif status == "accepted":
+        await update.message.reply_text(f"✅ Followed @{result['target_username']} (or already public).")
+    else:
+        await update.message.reply_text(
+            f"📨 Follow request sent to @{result['target_username']} — "
+            "I'll message you here once it's accepted or declined."
+        )
+
+
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Inline mode: prepare in background; answer Send when ready (before query expires)."""
     inline = update.inline_query
@@ -384,6 +448,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message:
+        return
+
+    chat = update.effective_chat
+    if chat and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP) and not stats.is_group_enabled(chat.id):
         return
 
     if await admin_settings_input(update, context):

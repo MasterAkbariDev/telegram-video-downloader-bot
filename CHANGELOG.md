@@ -2,6 +2,44 @@
 
 All notable changes to this bot are documented here.
 
+## 1.9.0 — 2026-09-22
+
+### Added
+- **Multi-account Instagram support.** Any number of Instagram accounts can
+  now be configured (admin panel → 📸 Instagram Accounts → ➕ Add existing /
+  ➕ Create new), each with its own session, cookies, proxy, and TOTP secret
+  under `data/instagram/<account>/`. Every download and every like/save
+  randomly picks one enabled account (`pick_enabled_account()` in
+  `bot/instagram_auth.py`) instead of there being one single configured
+  account. A pre-existing single-account `.env` setup (`INSTAGRAM_USERNAME`/
+  `PASSWORD`) is migrated automatically the first time it's read — no
+  manual steps. The bot works exactly as before with zero accounts
+  configured: accounts are only ever a fallback for login-walled or
+  private posts, never required for normal public downloads.
+- **`/request username_or_id`** — any bot user (not just the admin) can ask
+  the bot to send a follow request to a private Instagram account from one
+  of its own accounts, and gets messaged in that same chat once Instagram
+  actually accepts or declines it (`bot/follow_requests.py`, polled every 3
+  minutes via a background loop — the same `asyncio.create_task` pattern
+  `bot/update_check.py` already used, no new dependency). A 10-minute
+  per-user cooldown guards against follow-request spam, since mass-following
+  is one of the most heavily flagged Instagram behaviors.
+- **`/disablebot` and `/enablebot`** — a group's own Telegram admins can turn
+  the bot's link-downloading off/on for that group specifically. Commands
+  keep working while disabled so a group can always re-enable itself.
+- **📡 Account Stats** admin section — per account and aggregated: live
+  follower/following/post counts (fetched from Instagram on demand), plus
+  local counts of likes given, saves given, and follow-request outcomes.
+- **🔒 Private Requests** admin section — every follow request any user has
+  made, with status, target, and which account sent it, plus a manual
+  refresh.
+
+### Changed
+- **Admin panel menu regrouped** from 11 flat top-level buttons into 6
+  categories (📊 System, 📸 Instagram Accounts, 🔒 Private Requests, 📡
+  Account Stats, ⚙️ More, ✕ Close) — each leading to the same screens as
+  before, just one level deeper.
+
 ## 1.8.29 — 2026-09-22
 
 ### Added

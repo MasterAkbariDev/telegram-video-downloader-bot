@@ -25,14 +25,18 @@ from bot.handlers import (
     about_command,
     cancel_command,
     chosen_inline_result_handler,
+    disablebot_command,
+    enablebot_command,
     handle_document,
     handle_message,
     help_command,
     inline_query_handler,
     quality_callback,
+    request_command,
     start_command,
 )
 from bot import stats
+from bot.follow_requests import follow_request_poll_loop
 from bot.updater import notify_pending_update
 from bot.update_check import notify_admins_if_update_available, update_check_loop
 from bot.version import format_version_label
@@ -48,6 +52,8 @@ async def _post_init(application) -> None:
     await notify_admins_if_update_available(application)
     # Keep checking in the background; still only alerts once per version
     asyncio.create_task(update_check_loop(application))
+    # Notify requesters once a follow request they made is accepted/declined
+    asyncio.create_task(follow_request_poll_loop(application))
 
 
 def _build_application() -> Application:
@@ -127,6 +133,9 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("about", about_command))
+    app.add_handler(CommandHandler("request", request_command))
+    app.add_handler(CommandHandler("disablebot", disablebot_command))
+    app.add_handler(CommandHandler("enablebot", enablebot_command))
     app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(ChosenInlineResultHandler(chosen_inline_result_handler))
     app.add_handler(

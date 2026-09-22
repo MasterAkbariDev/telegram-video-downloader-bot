@@ -62,6 +62,50 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_failures_kind ON download_failures(kind)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS instagram_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_username TEXT NOT NULL,
+                action TEXT NOT NULL,
+                media_pk TEXT,
+                url TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ig_actions_account ON instagram_actions(account_username)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS follow_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                requester_user_id INTEGER,
+                requester_chat_id INTEGER,
+                account_username TEXT NOT NULL,
+                target_input TEXT,
+                target_user_id TEXT,
+                target_username TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                notified INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_follow_requests_status ON follow_requests(status)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS group_settings (
+                chat_id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         conn.commit()
         _db_initialized = True
     finally:
@@ -237,3 +281,143 @@ def get_disk_info() -> dict:
         "disk_free": usage.free,
         "downloads_bytes": downloads_bytes,
     }
+
+
+# ---- Instagram like/save bookkeeping (real counts, not just probabilities) ----
+
+
+def record_instagram_action(account_username: str, action: str, media_pk: str, url: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO instagram_actions (account_username, action, media_pk, url, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (account_username, action, media_pk, url[:2000], now),
+        )
+        conn.commit()
+
+
+def get_instagram_action_counts(account_username: str | None = None) -> dict:
+    """{'like': n, 'save': n} — for one account, or aggregated across all if omitted."""
+    with _connect() as conn:
+        if account_username:
+            rows = conn.execute(
+                "SELECT action, COUNT(*) AS n FROM instagram_actions WHERE account_username = ? GROUP BY action",
+                (account_username,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT action, COUNT(*) AS n FROM instagram_actions GROUP BY action"
+            ).fetchall()
+    counts = {"like": 0, "save": 0}
+    for row in rows:
+        counts[row["action"]] = row["n"]
+    return counts
+
+
+# ---- Follow requests (private-account requests, any bot user) ----
+
+
+def insert_follow_request(
+    *,
+    requester_user_id: int,
+    requester_chat_id: int,
+    account_username: str,
+    target_input: str,
+    target_user_id: str | None,
+    target_username: str | None,
+    status: str,
+) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO follow_requests
+                (requester_user_id, requester_chat_id, account_username, target_input,
+                 target_user_id, target_username, status, created_at, updated_at, notified)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            """,
+            (
+                requester_user_id, requester_chat_id, account_username, target_input,
+                target_user_id, target_username, status, now, now,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def get_pending_follow_requests() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM follow_requests WHERE status = 'pending' ORDER BY id"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_all_follow_requests(limit: int = 50) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM follow_requests ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_follow_request_counts(account_username: str | None = None) -> dict:
+    """{'pending': n, 'accepted': n, 'rejected': n, 'error': n}."""
+    with _connect() as conn:
+        if account_username:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM follow_requests WHERE account_username = ? GROUP BY status",
+                (account_username,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM follow_requests GROUP BY status"
+            ).fetchall()
+    counts = {"pending": 0, "accepted": 0, "rejected": 0, "error": 0}
+    for row in rows:
+        counts[row["status"]] = row["n"]
+    return counts
+
+
+def update_follow_request_status(request_id: int, status: str, *, notified: bool | None = None) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        if notified is None:
+            conn.execute(
+                "UPDATE follow_requests SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, request_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE follow_requests SET status = ?, updated_at = ?, notified = ? WHERE id = ?",
+                (status, now, int(notified), request_id),
+            )
+        conn.commit()
+
+
+# ---- Per-group enable/disable (group admins can turn link-downloading off) ----
+
+
+def is_group_enabled(chat_id: int) -> bool:
+    """Absence of a row means enabled — only disabled groups need one."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT enabled FROM group_settings WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return True if row is None else bool(row["enabled"])
+
+
+def set_group_enabled(chat_id: int, enabled: bool) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO group_settings (chat_id, enabled, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at
+            """,
+            (chat_id, int(enabled), now),
+        )
+        conn.commit()

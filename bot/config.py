@@ -1,5 +1,6 @@
 """Bot configuration loaded from environment."""
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -63,6 +64,95 @@ INSTAGRAM_TOTP_SECRET = os.getenv("INSTAGRAM_TOTP_SECRET", "").strip() or None
 # a last-resort fallback when free extraction (yt-dlp + anonymous scraping)
 # fails, e.g. for login-walled posts — never on the normal/public-post path.
 HIKERAPI_KEY = os.getenv("HIKERAPI_KEY", "").strip() or None
+
+INSTAGRAM_ACCOUNTS_FILE = DATA_DIR / "instagram_accounts.json"
+
+
+def _legacy_env_account() -> dict | None:
+    """The pre-multi-account single INSTAGRAM_USERNAME/PASSWORD, if set."""
+    if INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD:
+        return {
+            "username": INSTAGRAM_USERNAME,
+            "password": INSTAGRAM_PASSWORD,
+            "proxy": INSTAGRAM_PROXY,
+            "totp_secret": INSTAGRAM_TOTP_SECRET,
+            "enabled": True,
+        }
+    return None
+
+
+def get_instagram_accounts() -> list[dict]:
+    """All configured Instagram accounts (username/password/proxy/totp_secret/enabled).
+
+    Migrates the legacy single INSTAGRAM_USERNAME/PASSWORD env vars into
+    data/instagram_accounts.json the first time this is called, if that file
+    doesn't exist yet — existing single-account setups keep working with no
+    manual steps.
+    """
+    if not INSTAGRAM_ACCOUNTS_FILE.is_file():
+        legacy = _legacy_env_account()
+        if not legacy:
+            return []
+        save_instagram_accounts([legacy])
+        return [legacy]
+    try:
+        data = json.loads(INSTAGRAM_ACCOUNTS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read %s: %s", INSTAGRAM_ACCOUNTS_FILE, exc)
+        return []
+    return data if isinstance(data, list) else []
+
+
+def save_instagram_accounts(accounts: list[dict]) -> None:
+    INSTAGRAM_ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = INSTAGRAM_ACCOUNTS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(accounts, indent=2), encoding="utf-8")
+    tmp.replace(INSTAGRAM_ACCOUNTS_FILE)
+
+
+def add_instagram_account(
+    username: str, password: str, *, proxy: str | None = None, totp_secret: str | None = None
+) -> None:
+    accounts = [a for a in get_instagram_accounts() if a.get("username") != username]
+    accounts.append(
+        {
+            "username": username,
+            "password": password,
+            "proxy": proxy,
+            "totp_secret": totp_secret,
+            "enabled": True,
+        }
+    )
+    save_instagram_accounts(accounts)
+
+
+def remove_instagram_account(username: str) -> bool:
+    accounts = get_instagram_accounts()
+    kept = [a for a in accounts if a.get("username") != username]
+    if len(kept) == len(accounts):
+        return False
+    save_instagram_accounts(kept)
+    return True
+
+
+def set_instagram_account_enabled(username: str, enabled: bool) -> bool:
+    accounts = get_instagram_accounts()
+    found = False
+    for account in accounts:
+        if account.get("username") == username:
+            account["enabled"] = enabled
+            found = True
+    if found:
+        save_instagram_accounts(accounts)
+    return found
+
+
+def get_instagram_account(username: str) -> dict | None:
+    for account in get_instagram_accounts():
+        if account.get("username") == username:
+            return account
+    return None
+
 
 STANDARD_UPLOAD_LIMIT = 50 * 1024 * 1024
 LARGE_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024
