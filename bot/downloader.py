@@ -1257,6 +1257,28 @@ def _instagram_extract(
         except DownloadError as exc:
             if not is_instagram_login_required(exc):
                 raise
+
+            # "Instagram sent an empty media response" specifically is often
+            # a transient API hiccup, not a real login wall — confirmed live
+            # against a real post: a plain retry with the exact same (or no)
+            # cookies succeeded outright for content that a forced re-login
+            # then wrongly assumed needed authentication, burning ~40s on two
+            # doomed login attempts (and hammering whatever account happens
+            # to be configured, even when it isn't the actual problem) before
+            # giving up with a misleading "needs login" message. Try once
+            # more, cheaply, before escalating to that expensive path.
+            if "empty media response" in str(exc).lower():
+                try:
+                    time.sleep(2.0)
+                    return _extract_info_with_retry(
+                        _instagram_ydl,
+                        url,
+                        progress_callback=progress_callback,
+                        cancel_check=cancel_check,
+                    )
+                except DownloadError:
+                    pass  # genuinely needs the login escalation below
+
             # Session expired / login wall — refresh once and retry
             logger.warning("Instagram auth failed — refreshing auto-login cookies")
             refreshed = refresh_instagram_cookies()

@@ -2,6 +2,23 @@
 
 All notable changes to this bot are documented here.
 
+## 1.11.3 — 2026-09-22
+
+### Fixed
+- **A transient Instagram glitch was wrongly treated as a login wall,
+  wasting ~40s on two doomed logins before failing with a misleading
+  message.** Diagnosed live on production: a reel that needed no login at
+  all (a plain manual retry succeeded instantly via CDN direct-send, no
+  auth involved) initially failed with yt-dlp's "Instagram sent an empty
+  media response" — a known-transient API hiccup, not a real login wall —
+  which `is_instagram_login_required()` unconditionally treats as one.
+  That triggered a full forced-login escalation against whichever account
+  is configured, twice in a row (each ~35s), before giving up. `_instagram_extract()`
+  now retries once, plainly (no forced login), specifically for this error
+  signature, before escalating to the expensive path — verified with both
+  outcomes: a transient failure now resolves without ever touching login,
+  and a genuine login wall still escalates correctly.
+
 ## 1.11.2 — 2026-09-22
 
 ### Fixed
