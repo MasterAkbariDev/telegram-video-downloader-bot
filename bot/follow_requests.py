@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 
 from bot import config as cfg
@@ -28,6 +29,65 @@ logger = logging.getLogger(__name__)
 _REQUESTER_COOLDOWN_SEC = 10 * 60  # one follow request per user per 10 minutes
 _last_request_at: dict[int, float] = {}
 _POLL_INTERVAL_SEC = 180  # re-check pending requests every 3 minutes
+
+# Instagram usernames: letters, numbers, periods, underscores, 1-30 chars.
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_.]{1,30}$")
+_NON_PROFILE_PATHS = {
+    "p", "reel", "reels", "stories", "explore", "accounts", "tv", "direct", "web", "graphql", "api",
+}
+
+# user_id -> expiry (monotonic), while the "🔒 Request private account"
+# button is waiting on that user's next text message.
+_TARGET_INPUT_TTL_SEC = 300.0
+_awaiting_target: dict[int, float] = {}
+
+
+def mark_awaiting_target(user_id: int) -> None:
+    _awaiting_target[user_id] = time.monotonic() + _TARGET_INPUT_TTL_SEC
+
+
+def is_awaiting_target(user_id: int) -> bool:
+    expiry = _awaiting_target.get(user_id)
+    if expiry is None:
+        return False
+    if time.monotonic() > expiry:
+        _awaiting_target.pop(user_id, None)
+        return False
+    return True
+
+
+def clear_awaiting_target(user_id: int) -> None:
+    _awaiting_target.pop(user_id, None)
+
+
+def parse_target_input(text: str) -> tuple[str | None, str | None]:
+    """Accepts a username, a numeric user id, or a profile link
+    (instagram.com/<username>). Returns (target, None) on success, or
+    (None, error_message) if it doesn't even look like a valid target —
+    this is a shape check only; whether the account actually exists is
+    only known once we try to resolve it against Instagram.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None, "Send a username, numeric ID, or profile link."
+
+    if "instagram.com" in text.lower():
+        path = re.sub(r"^https?://", "", text, flags=re.I)
+        path = path.split("?", 1)[0].split("#", 1)[0]
+        parts = [p for p in path.split("/") if p]
+        if len(parts) < 2:
+            return None, "That link doesn't look like a profile link (no username in it)."
+        username = parts[1]
+        if username.lower() in _NON_PROFILE_PATHS:
+            return None, "That's a post/reel link, not a profile link — send the account's profile link instead."
+        text = username
+
+    text = text.strip().lstrip("@")
+    if text.isdigit():
+        return text, None
+    if not _USERNAME_RE.match(text):
+        return None, "That doesn't look like a valid Instagram username."
+    return text, None
 
 
 def requester_cooldown_remaining(user_id: int) -> float:

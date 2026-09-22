@@ -47,21 +47,40 @@ from bot.urls import extract_any_urls_from_message, extract_urls_from_message
 logger = logging.getLogger(__name__)
 
 
+def _user_start_keyboard(is_admin_user: bool) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("🔒 Request private account", callback_data="reqpriv:start")]]
+    if is_admin_user:
+        rows.append([InlineKeyboardButton("⚙️ Admin panel", callback_data="admin:home")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    reply_markup = None
     chat = update.effective_chat
-    if (
-        update.effective_user
-        and is_admin(update.effective_user.id)
-        and chat
-        and chat.type == ChatType.PRIVATE
-    ):
-        reply_markup = admin_keyboard_for_start()
+    user = update.effective_user
+    is_admin_user = bool(user and is_admin(user.id) and chat and chat.type == ChatType.PRIVATE)
     await update.message.reply_text(
         msg.start_text(),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
-        reply_markup=reply_markup,
+        reply_markup=_user_start_keyboard(is_admin_user),
+    )
+
+
+async def request_private_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """"🔒 Request private account" button — prompts for a target, then
+    handle_message() picks up the next text message via is_awaiting_target()."""
+    from bot.follow_requests import mark_awaiting_target
+
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    if not user:
+        return
+    mark_awaiting_target(user.id)
+    await query.message.reply_text(
+        "🔒 Send the private account's <b>username</b>, <b>numeric ID</b>, or "
+        "<b>profile link</b> (e.g. https://instagram.com/username) — or /cancel.",
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -97,6 +116,11 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not user:
         return
 
+    from bot.follow_requests import clear_awaiting_target, is_awaiting_target
+
+    had_pending_target = is_awaiting_target(user.id)
+    clear_awaiting_target(user.id)
+
     cleared = quality_pending.clear_user(user.id)
     if request_cancel(user.id):
         await update.message.reply_text("🛑 Cancelling current download/upload…")
@@ -104,6 +128,10 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if cleared:
         await update.message.reply_text("🛑 Quality selection cancelled.")
+        return
+
+    if had_pending_target:
+        await update.message.reply_text("🛑 Follow request cancelled.")
         return
 
     await update.message.reply_text("Nothing in progress to cancel.")
@@ -141,36 +169,48 @@ async def enablebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text("🔔 Downloading re-enabled in this group.")
 
 
-async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/request <username_or_id> — send a follow request to a private Instagram
-    account from one of the bot's own accounts; the requester is told here
-    once Instagram actually accepts or declines it."""
+async def _send_follow_request_and_reply(message, user_id: int, chat_id: int, target: str) -> None:
     from bot.follow_requests import send_follow_request
+
+    result = await asyncio.to_thread(send_follow_request, user_id, chat_id, target)
+    status = result["status"]
+    if status == "error":
+        await message.reply_text(f"❌ {result['detail']}")
+    elif status == "accepted":
+        await message.reply_text(f"✅ Followed @{result['target_username']} (or already public).")
+    else:
+        await message.reply_text(
+            f"📨 Follow request sent to @{result['target_username']} — "
+            "I'll message you here once it's accepted or declined."
+        )
+
+
+async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/request <username_or_id_or_link> — send a follow request to a private
+    Instagram account from one of the bot's own accounts; the requester is
+    told here once Instagram actually accepts or declines it."""
+    from bot.follow_requests import parse_target_input
 
     user = update.effective_user
     chat = update.effective_chat
     if not user or not chat:
         return
-    target = " ".join(context.args).strip() if context.args else ""
-    if not target:
+    raw = " ".join(context.args).strip() if context.args else ""
+    if not raw:
         await update.message.reply_text(
-            "Usage: <code>/request username_or_id</code> — sends a follow request "
-            "to that Instagram account and lets you know here once it's accepted or declined.",
+            "Usage: <code>/request username_or_id_or_profile_link</code> — sends a "
+            "follow request to that Instagram account and lets you know here once "
+            "it's accepted or declined.",
             parse_mode=ParseMode.HTML,
         )
         return
 
-    result = await asyncio.to_thread(send_follow_request, user.id, chat.id, target)
-    status = result["status"]
-    if status == "error":
-        await update.message.reply_text(f"❌ {result['detail']}")
-    elif status == "accepted":
-        await update.message.reply_text(f"✅ Followed @{result['target_username']} (or already public).")
-    else:
-        await update.message.reply_text(
-            f"📨 Follow request sent to @{result['target_username']} — "
-            "I'll message you here once it's accepted or declined."
-        )
+    target, error = parse_target_input(raw)
+    if error:
+        await update.message.reply_text(f"❌ {error}")
+        return
+
+    await _send_follow_request_and_reply(update.message, user.id, chat.id, target)
 
 
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -456,6 +496,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if await admin_settings_input(update, context):
         return
+
+    user = update.effective_user
+    if user:
+        from bot.follow_requests import clear_awaiting_target, is_awaiting_target, parse_target_input
+
+        if is_awaiting_target(user.id):
+            clear_awaiting_target(user.id)
+            raw = message.text or message.caption or ""
+            target, error = parse_target_input(raw)
+            if error:
+                await message.reply_text(f"❌ {error}")
+                return
+            await _send_follow_request_and_reply(message, user.id, chat.id if chat else message.chat_id, target)
+            return
 
     urls = extract_urls_from_message(message)
     if not urls:

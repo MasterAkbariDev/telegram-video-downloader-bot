@@ -2,6 +2,20 @@
 
 All notable changes to this bot are documented here.
 
+## 1.9.2 — 2026-09-22
+
+### Added
+- **"🔒 Request private account" button** on /start, for any user (not just
+  admin). Tapping it prompts for a target; the next message is validated
+  and sent the same way `/request` already worked. `/request` and the
+  button now both accept a **profile link** (e.g.
+  `https://instagram.com/username`) in addition to a bare username or
+  numeric ID, via a new shared `parse_target_input()` in
+  `bot/follow_requests.py` — rejects post/reel links (with a specific
+  message telling the user to send the profile link instead), empty
+  input, and invalid username shapes before ever contacting Instagram.
+  `/cancel` clears a pending "waiting for a target" prompt too.
+
 ## 1.9.1 — 2026-09-22
 
 ### Fixed

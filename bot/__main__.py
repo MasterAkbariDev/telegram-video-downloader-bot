@@ -33,6 +33,7 @@ from bot.handlers import (
     inline_query_handler,
     quality_callback,
     request_command,
+    request_private_callback,
     start_command,
 )
 from bot import stats
@@ -124,6 +125,14 @@ def main() -> None:
         CallbackQueryHandler(
             quality_callback,
             pattern=r"^q:",
+            block=True,
+        ),
+        group=0,
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            request_private_callback,
+            pattern=r"^reqpriv:",
             block=True,
         ),
         group=0,
