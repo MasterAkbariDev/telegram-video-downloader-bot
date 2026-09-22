@@ -332,6 +332,16 @@ def resolve_spotify_via_youtube(
     )
 
 
+def _looks_transient(exc: Exception) -> bool:
+    """A 403/429 from a source is very often a momentary block (YouTube and
+    SoundCloud both do this under bursty traffic, and a server IP that
+    sends a lot of requests over a day is exactly the kind of traffic
+    pattern that gets flagged) rather than a real "this doesn't exist"
+    failure — worth one retry before giving up on that attempt."""
+    text = str(exc).lower()
+    return any(marker in text for marker in ("403", "429", "forbidden", "too many requests"))
+
+
 def _resolve_music_by_query(
     query: str,
     *,
@@ -397,11 +407,7 @@ def _resolve_music_by_query(
                 break
             except Exception as exc:
                 last_exc = exc
-                text = str(exc).lower()
-                looks_transient = any(
-                    marker in text for marker in ("403", "429", "forbidden", "too many requests")
-                )
-                if attempt == 1 and looks_transient:
+                if attempt == 1 and _looks_transient(exc):
                     import time
 
                     logger.info(
@@ -423,20 +429,27 @@ def _resolve_music_by_query(
             )
 
     if allow_yt_search:
-        if cancel_check:
-            cancel_check()
-        try:
-            logger.info("Music search fallback ytsearch %r", query)
-            return resolve_media(
-                f"ytsearch5:{query}",
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
-                force_audio=force_audio,
-                display_title=display_title,
-            )
-        except Exception as exc:
-            errors.append(f"youtube: {exc}")
-            logger.warning("Music ytsearch fallback failed: %s", exc)
+        for attempt in (1, 2):
+            if cancel_check:
+                cancel_check()
+            try:
+                logger.info("Music search fallback ytsearch %r", query)
+                return resolve_media(
+                    f"ytsearch5:{query}",
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                    force_audio=force_audio,
+                    display_title=display_title,
+                )
+            except Exception as exc:
+                if attempt == 1 and _looks_transient(exc):
+                    import time
+
+                    logger.info("ytsearch fallback looked transiently blocked, retrying once: %s", exc)
+                    time.sleep(1.5)
+                    continue
+                errors.append(f"youtube: {exc}")
+                logger.warning("Music ytsearch fallback failed: %s", exc)
 
     detail = "; ".join(errors)[:400] if errors else "no candidates"
     raise RuntimeError(f"{not_found_message} (details: {detail})")

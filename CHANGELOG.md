@@ -2,6 +2,20 @@
 
 All notable changes to this bot are documented here.
 
+## 1.10.1 — 2026-09-22
+
+### Fixed
+- **The transient-403 retry added in 1.10.0 didn't cover the actual
+  fallback path that fails in practice.** Diagnosed live: for a track with
+  no SoundCloud/Audius match (not uncommon for regional/remix tracks),
+  resolution falls through entirely to a `ytsearch5:` YouTube search —
+  a separate code path from the per-candidate loop the earlier retry was
+  added to, so it had zero retry logic of its own. A server IP that sends
+  a lot of YouTube requests over a day is exactly the traffic pattern
+  YouTube's bot detection flags, so a plain 403 there wasn't unlikely.
+  Extracted the transient-detection check into `_looks_transient()` and
+  applied the same one-retry-after-backoff to the `ytsearch5` fallback too.
+
 ## 1.10.0 — 2026-09-22
 
 ### Fixed
