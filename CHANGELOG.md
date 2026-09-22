@@ -2,6 +2,25 @@
 
 All notable changes to this bot are documented here.
 
+## 1.8.26 — 2026-09-22
+
+### Fixed
+- **The CAA two-step verification code was requested from the admin BEFORE
+  Instagram had actually been told to send one.** `instagrapi`'s
+  `bloks_caa_resolve_two_step_verification()` bundles three network calls
+  into one: `entrypoint` → `code_entry` → `submit_code`. Instagram only
+  dispatches the code as a side effect of the `code_entry` step — but that
+  whole method takes the code as an input parameter, so our code had to ask
+  for the code *before* calling it at all, i.e. before any of those three
+  steps had run. Every "check your email/SMS for the code" prompt was
+  therefore sent to the admin before Instagram had any code to send,
+  which is exactly why checking immediately kept turning up nothing. Added
+  `_resolve_caa_two_step_verification()`, which runs `entrypoint` and
+  `code_entry` first (triggering the actual send) and only then asks for
+  the code, before submitting it. TOTP (authenticator app) codes are
+  unaffected — those don't need a "send" step, since the code already
+  exists locally.
+
 ## 1.8.25 — 2026-09-22
 
 ### Fixed

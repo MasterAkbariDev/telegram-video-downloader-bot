@@ -416,15 +416,11 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
         return  # logged in on the first pass, nothing more to do
 
     if cl.bloks_caa_login_needs_two_step(result):
-        code = _totp_code() or (
-            code_provider(
-                username, "the verification code Instagram just sent (email, SMS, or authenticator app)"
-            )
-            or ""
-        ).strip()
-        if not code:
-            raise RuntimeError("No verification code was provided — login cancelled.")
-        two_step = cl.bloks_caa_resolve_two_step_verification(result, verification_code=code)
+        totp = _totp_code()
+        if totp:
+            two_step = cl.bloks_caa_resolve_two_step_verification(result, verification_code=totp)
+        else:
+            two_step = _resolve_caa_two_step_verification(cl, username, result, code_provider)
         if two_step.get("logged_in"):
             return
         reason = two_step.get("reason") or ""
@@ -465,6 +461,53 @@ def _perform_login_interactive(cl, username: str, password: str, code_provider: 
     reason = _bloks_best_effort_reason(result)
     detail = f" ({reason})" if reason else f" (markers: {markers})" if markers else ""
     raise RuntimeError(f"Instagram declined this login for an unrecognized reason{detail}. Check server logs for the raw response.")
+
+
+def _resolve_caa_two_step_verification(cl, username: str, send_result: dict, code_provider: CodeProvider) -> dict:
+    """Same three sub-steps as instagrapi's own bloks_caa_resolve_two_step_verification()
+    (entrypoint -> code_entry -> submit_code), but asks for the code only
+    *after* the entrypoint/code_entry calls run — those are what actually
+    make Instagram dispatch the code. instagrapi's version takes the code as
+    a parameter up front, which forces a caller into asking a human for a
+    code before Instagram has been told to send one; the code request was
+    landing before anything existed to find. This fixes that ordering."""
+    from instagrapi.mixins.bloks import (
+        AP_2SV_CODE_ENTRY,
+        AP_2SV_CODE_ENTRY_ASYNC,
+        AP_2SV_ENTRYPOINT,
+    )
+
+    entry_context = cl.bloks_extract_context_data(send_result, AP_2SV_ENTRYPOINT)
+    if not entry_context:
+        return {"logged_in": False, "reason": "missing entrypoint context_data"}
+    entry_result = cl.bloks_ap_two_step_verification_entrypoint(entry_context)
+
+    code_context = cl.bloks_extract_context_data(entry_result, AP_2SV_CODE_ENTRY)
+    if not code_context:
+        return {"logged_in": False, "reason": "missing code_entry context_data"}
+    # Instagram actually sends/dispatches the code as a side effect of this
+    # call — only ask the human for it now.
+    code_result = cl.bloks_ap_two_step_verification_code_entry(code_context)
+
+    submit_context = cl.bloks_extract_context_data(code_result, AP_2SV_CODE_ENTRY_ASYNC)
+    if not submit_context:
+        return {"logged_in": False, "reason": "missing code_entry_async context_data"}
+
+    code = (
+        code_provider(
+            username, "the verification code Instagram just sent (check email/SMS now)"
+        )
+        or ""
+    ).strip()
+    if not code:
+        return {"logged_in": False, "reason": "no code provided"}
+
+    submit_result = cl.bloks_ap_two_step_verification_submit_code(submit_context, code)
+    return {
+        "logged_in": cl.bloks_apply_login_response(submit_result),
+        "reason": "",
+        "result": submit_result,
+    }
 
 
 def _bloks_best_effort_reason(result: dict) -> str:
