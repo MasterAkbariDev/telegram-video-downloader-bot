@@ -16,6 +16,7 @@ from urllib.parse import quote
 
 import httpx
 
+from bot import config as cfg
 from bot.config import DOWNLOAD_DIR, YTDLP_PROXY
 
 logger = logging.getLogger(__name__)
@@ -43,9 +44,13 @@ _AUDIUS_HOSTS = (
 _SOURCE_BONUS = {
     "audius": 10.0,
     "soundcloud": 8.0,
+    "jamendo": 6.0,
+    # Bandcamp needs its own yt-dlp extraction pass (no direct stream_url
+    # like the others), so rank it below sources that hand back one directly.
+    "bandcamp": 4.0,
 }
 
-_SEARCH_WORKERS = 3
+_SEARCH_WORKERS = 4
 _SEARCH_BUDGET_SEC = 10.0
 _MAX_DOWNLOAD_TRIES = 8
 
@@ -469,6 +474,8 @@ def _parallel_music_search(
     searchers = (
         ("soundcloud", lambda: _search_soundcloud_candidates(query, prefer_title, prefer_artist)),
         ("audius", lambda: _search_audius_candidates(query, prefer_title, prefer_artist)),
+        ("bandcamp", lambda: _search_bandcamp_candidates(query, prefer_title, prefer_artist)),
+        ("jamendo", lambda: _search_jamendo_candidates(query, prefer_title, prefer_artist)),
     )
 
     merged: list[_MusicCandidate] = []
@@ -975,6 +982,121 @@ def _search_audius_candidates(
                     return out[:5]
             except (httpx.HTTPError, json.JSONDecodeError, ValueError, TypeError) as exc:
                 logger.debug("Audius search %s failed: %s", host, exc)
+    return out
+
+
+def _search_jamendo_candidates(
+    query: str,
+    prefer_title: str,
+    prefer_artist: str,
+) -> list[_MusicCandidate]:
+    """Jamendo's free/CC-licensed catalog — widens the net for tracks with
+    no match on SoundCloud/Audius/YouTube. No-op without a (free,
+    self-registered) JAMENDO_CLIENT_ID — this never blocks the rest of the
+    search, just adds one more source when configured."""
+    client_id = cfg.JAMENDO_CLIENT_ID
+    if not client_id:
+        return []
+    out: list[_MusicCandidate] = []
+    try:
+        with httpx.Client(
+            headers={"User-Agent": _DESKTOP_UA}, proxy=YTDLP_PROXY, timeout=12.0, follow_redirects=True
+        ) as client:
+            resp = client.get(
+                "https://api.jamendo.com/v3.0/tracks/",
+                params={
+                    "client_id": client_id,
+                    "format": "json",
+                    "search": query,
+                    "limit": 8,
+                    "audioformat": "mp32",
+                },
+            )
+            if resp.status_code >= 400:
+                return []
+            for track in (resp.json() or {}).get("results") or []:
+                if not isinstance(track, dict):
+                    continue
+                title = (track.get("name") or "").strip()
+                artist = (track.get("artist_name") or "").strip()
+                audio = track.get("audio") or ""
+                if not title or not audio:
+                    continue
+                duration = track.get("duration")
+                try:
+                    dur = float(duration) if duration is not None else None
+                except (TypeError, ValueError):
+                    dur = None
+                entry = {"title": title, "uploader": artist, "duration": dur}
+                if prefer_title or prefer_artist:
+                    if not _rank_music_entries([entry], title=prefer_title or title, artist=prefer_artist):
+                        continue
+                out.append(
+                    _MusicCandidate(
+                        source="jamendo",
+                        title=title,
+                        uploader=artist,
+                        duration=dur,
+                        url=track.get("shareurl") or None,
+                        stream_url=audio,
+                        stream_ext="mp3",
+                    )
+                )
+    except (httpx.HTTPError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        logger.debug("Jamendo search failed: %s", exc)
+    return out[:5]
+
+
+def _search_bandcamp_candidates(
+    query: str,
+    prefer_title: str,
+    prefer_artist: str,
+) -> list[_MusicCandidate]:
+    """Bandcamp — many independent/regional artists release tracks here
+    (often free/name-your-price) that never make it to YouTube/SoundCloud.
+    Uses Bandcamp's own search-autocomplete API (no key needed) to find a
+    candidate track URL, then lets yt-dlp's existing Bandcamp extractor
+    (bot/downloader.py's normal yt-dlp path) handle the actual download —
+    same as any other cand.url candidate in _download_music_candidate()."""
+    out: list[_MusicCandidate] = []
+    try:
+        with httpx.Client(
+            headers={"User-Agent": _DESKTOP_UA, "Content-Type": "application/json"},
+            proxy=YTDLP_PROXY,
+            timeout=12.0,
+            follow_redirects=True,
+        ) as client:
+            resp = client.post(
+                "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic",
+                json={"search_text": query, "search_filter": "t", "full_page": False, "fan_id": None},
+            )
+            if resp.status_code >= 400:
+                return []
+            results = ((resp.json() or {}).get("auto") or {}).get("results") or []
+            for track in results:
+                if not isinstance(track, dict) or track.get("type") != "t":
+                    continue
+                title = (track.get("name") or "").strip()
+                artist = (track.get("band_name") or "").strip()
+                url = track.get("item_url_path") or ""
+                if not title or not url.startswith("http"):
+                    continue
+                entry = {"title": title, "uploader": artist, "duration": None}
+                if prefer_title or prefer_artist:
+                    if not _rank_music_entries([entry], title=prefer_title or title, artist=prefer_artist):
+                        continue
+                out.append(
+                    _MusicCandidate(
+                        source="bandcamp",
+                        title=title,
+                        uploader=artist,
+                        url=url,
+                    )
+                )
+                if len(out) >= 5:
+                    break
+    except (httpx.HTTPError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        logger.debug("Bandcamp search failed: %s", exc)
     return out
 
 

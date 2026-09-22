@@ -64,6 +64,10 @@ INSTAGRAM_TOTP_SECRET = os.getenv("INSTAGRAM_TOTP_SECRET", "").strip() or None
 # a last-resort fallback when free extraction (yt-dlp + anonymous scraping)
 # fails, e.g. for login-walled posts — never on the normal/public-post path.
 HIKERAPI_KEY = os.getenv("HIKERAPI_KEY", "").strip() or None
+# Optional Jamendo API key (jamendo.com, free registration) — widens Spotify
+# track matching to Jamendo's free/CC-licensed catalog, alongside the
+# no-key-needed SoundCloud/Audius/YouTube search already in place.
+JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip() or None
 
 INSTAGRAM_ACCOUNTS_FILE = DATA_DIR / "instagram_accounts.json"
 
@@ -180,6 +184,7 @@ def reload_settings() -> None:
     global BOT_TOKEN, TELEGRAM_PROXY, TELEGRAM_API_ID, TELEGRAM_API_HASH, ADMIN_IDS, QUALITY, MAX_VIDEO_HEIGHT
     global COOKIES_FILE, YTDLP_PROXY, INSTAGRAM_MIN_INTERVAL, COMPRESS_TARGET_MB
     global INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD, INSTAGRAM_PROXY, INSTAGRAM_TOTP_SECRET, HIKERAPI_KEY
+    global JAMENDO_CLIENT_ID
 
     load_dotenv(ROOT_DIR / ".env", override=True)
     BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -198,6 +203,7 @@ def reload_settings() -> None:
     INSTAGRAM_PROXY = os.getenv("INSTAGRAM_PROXY", "").strip() or None
     INSTAGRAM_TOTP_SECRET = os.getenv("INSTAGRAM_TOTP_SECRET", "").strip() or None
     HIKERAPI_KEY = os.getenv("HIKERAPI_KEY", "").strip() or None
+    JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip() or None
 
 
 def cookies_file_looks_valid(path: Path) -> bool:

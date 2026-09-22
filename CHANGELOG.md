@@ -2,6 +2,27 @@
 
 All notable changes to this bot are documented here.
 
+## 1.11.0 — 2026-09-22
+
+### Added
+- **Bandcamp and Jamendo as extra Spotify-matching sources**, alongside the
+  existing SoundCloud/Audius/YouTube search. Many independent/regional
+  artists release tracks on Bandcamp (often free/name-your-price) that
+  never make it to YouTube or SoundCloud — `_search_bandcamp_candidates()`
+  uses Bandcamp's own search API (no key needed) to find a track, then
+  yt-dlp's existing Bandcamp extractor handles the download, same as any
+  other URL-based candidate. Jamendo (a free, CC-licensed catalog) is a
+  second additional source, active only when a free, self-registered
+  `JAMENDO_CLIENT_ID` is set (see `.env.example`) — a no-op otherwise,
+  never blocking the rest of the search. Verified live end-to-end: a real
+  track found via Bandcamp downloaded successfully.
+
+This does **not** mean every Spotify-exclusive track is now downloadable —
+a track with no free/legal release anywhere still won't match, and won't
+pretend to. See project chat for why direct Spotify extraction (decrypting
+its DRM-protected stream) isn't something this bot will do, regardless of
+which account's credentials would be used for it.
+
 ## 1.10.1 — 2026-09-22
 
 ### Fixed
