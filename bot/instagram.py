@@ -889,9 +889,11 @@ def _fix_json(raw: str) -> str:
 
 
 def _load_cookie_header() -> str | None:
-    from bot.instagram_auth import ensure_instagram_cookies
+    # Passive lookup only — the anonymous scrape must never trigger an
+    # account login. Logging in is reserved for the login-wall fallback.
+    from bot.instagram_auth import existing_instagram_cookies
 
-    path = ensure_instagram_cookies() or get_cookies_file()
+    path = existing_instagram_cookies() or get_cookies_file()
     if not path:
         return None
     try:

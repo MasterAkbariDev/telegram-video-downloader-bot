@@ -1229,13 +1229,6 @@ def _cache_prompt_text() -> str:
 
 def _ig_accounts_overview_text() -> str:
     accounts = cfg.get_instagram_accounts()
-    from bot.hikerapi import hikerapi_configured
-
-    hiker_line = (
-        "✅ configured — used as a last resort for login-walled posts"
-        if hikerapi_configured()
-        else "❌ not set — recommended alongside accounts for reliability at scale, see README"
-    )
 
     lines = ["📸 <b>Instagram Accounts</b>\n"]
     if not accounts:
@@ -1249,15 +1242,11 @@ def _ig_accounts_overview_text() -> str:
             if not status["enabled"]:
                 icon = "⏸"
             lines.append(f"{icon} <code>{esc(account['username'])}</code>")
-        lines.append("")
-        lines.append("Downloads and likes/saves are spread randomly across enabled accounts.")
-    lines.append("")
-    lines.append(f"<b>HikerAPI (HIKERAPI_KEY):</b> {hiker_line}")
     lines.append("")
     lines.append(
-        "Accounts are only used as a fallback for login-walled or private "
-        "posts — the bot keeps working with zero accounts configured; "
-        "everything else still downloads anonymously."
+        "Accounts are only used as a fallback, after an anonymous attempt has "
+        "already failed with a login wall — the bot keeps working with zero "
+        "accounts configured; most public posts never touch an account."
     )
     return "\n".join(lines)
 
@@ -1288,14 +1277,12 @@ def _ig_account_detail_text(username: str) -> str:
     cooldown = status["cooldown_remaining_sec"]
     cooldown_line = f"\n⏳ Cooling down after a failed attempt — {cooldown / 60:.0f} min left" if cooldown > 0 else ""
 
-    like_save = stats.get_instagram_action_counts(username)
     req_counts = stats.get_follow_request_counts(username)
 
     return (
         f"📸 <b>{esc(username)}</b>\n\n"
         f"<b>Cookies:</b> {state}\n"
         f"<b>Status:</b> {' · '.join(bits)}{cooldown_line}\n\n"
-        f"❤️ {like_save['like']} likes given · 💾 {like_save['save']} saves given\n"
         f"🔒 {req_counts['pending']} pending · {req_counts['accepted']} accepted · "
         f"{req_counts['rejected']} declined follow requests\n\n"
         "<b>🔐 Login now</b> resolves checkpoints interactively — if Instagram "
@@ -1350,13 +1337,19 @@ def _account_stats_text() -> str:
         return "📡 <b>Account Stats</b>\n\n<i>No Instagram accounts configured yet.</i>"
 
     lines = ["📡 <b>Account Stats</b>\n"]
-    agg = {"followers": 0, "following": 0, "media": 0, "likes": 0, "saves": 0}
+    agg = {"followers": 0, "following": 0, "media": 0}
     for account in accounts:
         username = account["username"]
-        counts = stats.get_instagram_action_counts(username)
         req_counts = stats.get_follow_request_counts(username)
-        profile = _live_profile_info(account)
         lines.append(f"<b>{esc(username)}</b>")
+        if not account.get("enabled", True):
+            # Disabled accounts get no API traffic at all — not even this
+            # read-only profile lookup (e.g. one pulled after an
+            # automated-behaviour warning).
+            lines.append("  ⏸ disabled — live profile info not fetched")
+            profile = None
+        else:
+            profile = _live_profile_info(account)
         if profile:
             lines.append(
                 f"  👥 {profile['followers']} followers · {profile['following']} following · "
@@ -1365,20 +1358,17 @@ def _account_stats_text() -> str:
             agg["followers"] += profile["followers"]
             agg["following"] += profile["following"]
             agg["media"] += profile["media"]
-        else:
+        elif account.get("enabled", True):
             lines.append("  ⚠️ could not fetch live profile info (not logged in?)")
-        lines.append(f"  ❤️ {counts['like']} likes given · 💾 {counts['save']} saves given")
         lines.append(
             f"  🔒 {req_counts['pending']} pending · {req_counts['accepted']} accepted · "
             f"{req_counts['rejected']} declined follow requests"
         )
-        agg["likes"] += counts["like"]
-        agg["saves"] += counts["save"]
 
     lines.append("")
     lines.append(
         f"<b>Aggregate:</b> {agg['followers']} followers · {agg['following']} following · "
-        f"{agg['media']} posts · {agg['likes']} likes · {agg['saves']} saves"
+        f"{agg['media']} posts"
     )
     return "\n".join(lines)
 

@@ -63,11 +63,6 @@ INSTAGRAM_PROXY = os.getenv("INSTAGRAM_PROXY", "").strip() or None
 # Authenticator-app TOTP seed — enables fully automated 2FA login via pyotp.
 # (Settings → Two-factor authentication → Authentication app, on the IG account)
 INSTAGRAM_TOTP_SECRET = os.getenv("INSTAGRAM_TOTP_SECRET", "").strip() or None
-# Optional HikerAPI key (hikerapi.com) — a paid, managed Instagram data API
-# (runs its own residential-proxy + account pool server-side). Used only as
-# a last-resort fallback when free extraction (yt-dlp + anonymous scraping)
-# fails, e.g. for login-walled posts — never on the normal/public-post path.
-HIKERAPI_KEY = os.getenv("HIKERAPI_KEY", "").strip() or None
 # Optional Jamendo API key (jamendo.com, free registration) — widens Spotify
 # track matching to Jamendo's free/CC-licensed catalog, alongside the
 # no-key-needed SoundCloud/Audius/YouTube search already in place.
@@ -187,7 +182,7 @@ def reload_settings() -> None:
     """Reload .env — call after admin updates credentials."""
     global BOT_TOKEN, TELEGRAM_PROXY, TELEGRAM_API_ID, TELEGRAM_API_HASH, ADMIN_IDS, QUALITY, MAX_VIDEO_HEIGHT
     global COOKIES_FILE, YTDLP_PROXY, INSTAGRAM_MIN_INTERVAL, COMPRESS_TARGET_MB
-    global INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD, INSTAGRAM_PROXY, INSTAGRAM_TOTP_SECRET, HIKERAPI_KEY
+    global INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD, INSTAGRAM_PROXY, INSTAGRAM_TOTP_SECRET
     global JAMENDO_CLIENT_ID
 
     load_dotenv(ROOT_DIR / ".env", override=True)
@@ -206,7 +201,6 @@ def reload_settings() -> None:
     INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "").strip() or None
     INSTAGRAM_PROXY = os.getenv("INSTAGRAM_PROXY", "").strip() or None
     INSTAGRAM_TOTP_SECRET = os.getenv("INSTAGRAM_TOTP_SECRET", "").strip() or None
-    HIKERAPI_KEY = os.getenv("HIKERAPI_KEY", "").strip() or None
     JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip() or None
 
 

@@ -2,6 +2,33 @@
 
 All notable changes to this bot are documented here.
 
+## 1.13.0 — 2026-09-23
+
+### Changed
+- **Accounts are now only touched after an anonymous attempt has already
+  failed with a login wall** — the whole point being to keep automated
+  logins off the normal public-post path, which is what triggers
+  Instagram's "we suspect automated behaviour" warnings. The anonymous
+  scraper and the yt-dlp path both now try with only cookies already on
+  disk (never triggering a login), via a new passive
+  `existing_instagram_cookies()`; an account login happens solely in the
+  login-wall fallback. Most public posts never touch an account at all.
+
+### Removed
+- **HikerAPI integration removed entirely** (module, config, fallback,
+  admin panel line, docs) — per request; the bot relies on anonymous
+  extraction plus the account fallback only.
+- **Automatic like/save on fetched posts removed.** It was added to make an
+  account's activity look more human, but with Instagram now actively
+  flagging automated behaviour it adds risk rather than reducing it. The
+  `instagram_actions` table and its stats readouts are gone with it.
+
+### Docs
+- Rewrote the README Instagram section and `.env.example` for the current
+  multi-account, admin-panel-managed model (no HikerAPI, no single-account
+  `.env` login as the primary path), and emphasised using dedicated
+  bot-only accounts to avoid the automated-behaviour warnings.
+
 ## 1.12.0 — 2026-09-22
 
 ### Changed

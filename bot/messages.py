@@ -59,6 +59,12 @@ def start_text() -> str:
 
     return f"{START_TEXT}\n\n<i>{format_version_label()}</i>"
 
+INSTAGRAM_LOGIN_WALL_TEXT = (
+    "Instagram only shows this post to logged-in users, and none of the "
+    "bot's accounts could open it right now. If it's a private account, "
+    "use /request to ask it for access; otherwise try again later."
+)
+
 HELP_TEXT = (
     "💡 <b>How to use</b>\n\n"
     "1. Paste a plain link in the chat\n"
@@ -404,20 +410,16 @@ def friendly_error(raw: str) -> str:
             "This file is too large (max 50 MB). "
             "Admins can enable 2 GB uploads via /admin → 🔑 2 GB upload API."
         )
+    if "instagram" in lower and (
+        "private" in lower
+        or "login" in lower
+        or "logged-in" in lower
+        or "sign in" in lower
+        or "empty media response" in lower
+    ):
+        return INSTAGRAM_LOGIN_WALL_TEXT
     if "private" in lower or "login" in lower or "sign in" in lower:
-        if "instagram" in lower:
-            return (
-                "Instagram requires a logged-in session for this post. "
-                "Export Instagram cookies to <code>data/cookies.txt</code> "
-                "(COOKIES_FILE in .env), then try again."
-            )
         return "This content is private or requires a login."
-    if "empty media response" in lower or "logged-in" in lower and "instagram" in lower:
-        return (
-            "Instagram blocked anonymous access for this post. "
-            "Export cookies from a logged-in Instagram browser session to "
-            "<code>data/cookies.txt</code> (set COOKIES_FILE in .env)."
-        )
     if "410" in lower or " gone" in lower:
         return "This video was removed or is no longer available on the site."
     if "404" in lower or "not found" in lower:
@@ -436,12 +438,6 @@ def friendly_error(raw: str) -> str:
             "cookies to <code>data/cookies.txt</code> (set COOKIES_FILE in .env)."
         )
     if "429" in lower or "too many requests" in lower or "rate limit" in lower:
-        if "instagram" in lower:
-            return (
-                "Instagram is rate-limiting this server (too many requests). "
-                "Wait a few minutes and try again. Admins: add a cookies.txt file "
-                "(COOKIES_FILE in .env) to improve reliability."
-            )
         return "The site is rate-limiting requests. Wait a few minutes and try again."
     if "500" in lower or "internal server error" in lower:
         return "The site's media API failed temporarily. Try again in a few minutes."

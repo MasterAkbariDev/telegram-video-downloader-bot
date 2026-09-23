@@ -127,100 +127,47 @@ sudo systemctl restart telegram-bot
 | **Security** | Never share `.env`; keep token secret |
 | **Groups** | Still disable privacy mode in @BotFather (`/setprivacy` → Disable) |
 
-### YouTube / Instagram cookies (optional)
+### Instagram accounts (optional)
 
-YouTube often blocks datacenter IPs. Instagram increasingly requires a
-**logged-in session** for reels/posts.
+Most public Instagram posts download **anonymously** — no account needed.
+Accounts are only used as a fallback, after an anonymous attempt has
+already hit a login wall, and for `/request` follow requests to private
+accounts.
 
-**Recommended for reliability at any scale — a managed API (HikerAPI)**
+Add accounts in Telegram: `/admin` → **📸 Instagram Accounts** →
+**➕ Add existing account** (then **🔐 Login now**), **➕ Create new
+account**, or **⬆️ Upload cookies.txt** exported from a real logged-in
+browser session. Each account keeps its own session and cookies under
+`data/instagram/<account>/`, and work is spread across the enabled accounts
+that have a working session. Accounts that have never logged in are
+skipped until you log them in.
 
-Self-hosting Instagram login (Option A below) means running one account
-from one server IP, which is exactly what Instagram's risk system is built
-to catch — that's true of any library, not something specific to this bot.
-The way most production Instagram tools handle login-walled content
-reliably is by **not** running their own login at all: they call a managed
-API that maintains its own residential-proxy and account pool server-side.
+Recommendations:
 
-```env
-HIKERAPI_KEY=your_hikerapi_key
-```
+- **Use dedicated accounts only.** Don't use a bot account from your own
+  phone, and don't use your personal account in the bot. Instagram may warn
+  about or restrict accounts it sees being accessed by automated tools.
+- **If Instagram shows an account an automated-behaviour warning**, disable
+  that account in the admin panel so the bot stops using it.
+- **A residential/mobile proxy** per account (**🌐 Proxy** in the account's
+  screen) makes logins from a VPS much less likely to be rejected.
+- **Authenticator-app 2FA** can be automated with **🔑 TOTP secret**; SMS
+  codes are entered interactively when you tap **🔐 Login now**.
 
-Sign up at [hikerapi.com](https://hikerapi.com) (100 free requests, no card
-required) and set the key — no other setup needed. It's used **only as a
-last resort**, after free extraction (yt-dlp + anonymous scraping, which
-already handles the large majority of public posts) has failed, so normal
-usage costs nothing; a login-walled post costs ~$0.0006 (with usage-based
-volume discounts). This scales to any number of users without touching a
-single shared cookie per request, unlike self-hosted login.
+An account can only see a private account's posts if it **follows** that
+account.
 
-**Option A — Instagram auto-login (fully automated, but fights Instagram's risk system)**
+### YouTube cookies (optional)
 
-Set in `.env`:
-
-```env
-INSTAGRAM_USERNAME=your_username
-INSTAGRAM_PASSWORD=your_password
-
-# Strongly recommended — see "Why a proxy" below
-INSTAGRAM_PROXY=http://user:pass@residential-proxy-host:port
-
-# Only if the account has authenticator-app 2FA enabled
-INSTAGRAM_TOTP_SECRET=your_totp_seed
-```
-
-The bot logs in using Instagram's **mobile app login flow** (via
-[instagrapi](https://github.com/subzeroid/instagrapi)), not a scraped web
-form — it persists a device fingerprint (`data/instagram_session.json`) so
-repeat logins look like the same trusted phone returning instead of a new
-device every time, which is what avoids most checkpoints. It saves
-`data/instagram_cookies.txt` and refreshes automatically every ~5 days or
-when Instagram rejects the current session, with a 30-minute cooldown after
-a failed attempt so it doesn't hammer your account.
-
-If the account has 2FA, `INSTAGRAM_TOTP_SECRET` generates codes automatically
-(get the seed from Instagram: Settings → Two-factor authentication →
-Authentication app → "Can't scan the QR code?"). **SMS-based 2FA can't be
-automated** this way — use an authenticator app instead, or Option B.
-
-**Why a proxy matters:** Instagram's risk system flags logins from
-server/datacenter IPs — it can reject even the *correct* password from a VPS,
-independent of any code fix. A residential/mobile proxy (`INSTAGRAM_PROXY`)
-is the single biggest factor in reliable automated login; without one,
-expect occasional rate-limits or rejected logins from cloud IP ranges. Use a
-throwaway/dedicated Instagram account, not your personal one — there's a
-real (if reduced) risk of a checkpoint or lock either way.
-
-**Option B — Upload cookies via the admin panel (no password stored, but manual)**
-
-Open the bot in Telegram as an admin → `/admin` → **📸 Instagram cookies** →
-**⬆️ Upload cookies.txt**, then send a `cookies.txt` file exported from a
-**real, logged-in browser session** (e.g. with the "Get cookies.txt LOCALLY"
-extension, while logged into instagram.com). Nothing but session cookies
-touches the server, and it avoids automated-login checks entirely — but
-cookies aren't refreshed automatically, so you re-upload by hand when they
-expire (you'll start seeing login-wall errors again).
-
-Note: either option only unlocks a private account's posts if the logged-in
-account actually **follows** it — no cookie or login trick bypasses that.
-
-**Option C — Export cookies to a file manually**
-
-```bash
-# on your laptop
-scp cookies.txt root@YOUR_VPS:/opt/telegram-video-downloader-bot/data/cookies.txt
-
-# on the VPS
-sudo chown "$(whoami):$(whoami)" /opt/telegram-video-downloader-bot/data/cookies.txt
-sudo systemctl restart telegram-bot
-```
-
-Or set an explicit path in `.env`:
+YouTube sometimes blocks datacenter IPs. Put a Netscape-format
+`cookies.txt` exported from a logged-in browser at `data/cookies.txt`, or
+set an explicit path:
 
 ```env
 COOKIES_FILE=/opt/telegram-video-downloader-bot/data/cookies.txt
 ```
 
-Cookies expire; re-export if YouTube or Instagram starts failing again. Prefer exporting from a session that has used the same IP as the VPS when possible.
+Cookies expire; re-export if YouTube starts failing again.
 
 ### YouTube PO Token provider (recommended — fixes HTTP 403 on most videos)
 

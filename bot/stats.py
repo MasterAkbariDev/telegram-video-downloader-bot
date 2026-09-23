@@ -64,21 +64,6 @@ def init_db() -> None:
         )
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS instagram_actions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_username TEXT NOT NULL,
-                action TEXT NOT NULL,
-                media_pk TEXT,
-                url TEXT,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ig_actions_account ON instagram_actions(account_username)"
-        )
-        conn.execute(
-            """
             CREATE TABLE IF NOT EXISTS follow_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 requester_user_id INTEGER,
@@ -281,40 +266,6 @@ def get_disk_info() -> dict:
         "disk_free": usage.free,
         "downloads_bytes": downloads_bytes,
     }
-
-
-# ---- Instagram like/save bookkeeping (real counts, not just probabilities) ----
-
-
-def record_instagram_action(account_username: str, action: str, media_pk: str, url: str) -> None:
-    now = datetime.now(timezone.utc).isoformat()
-    with _connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO instagram_actions (account_username, action, media_pk, url, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (account_username, action, media_pk, url[:2000], now),
-        )
-        conn.commit()
-
-
-def get_instagram_action_counts(account_username: str | None = None) -> dict:
-    """{'like': n, 'save': n} — for one account, or aggregated across all if omitted."""
-    with _connect() as conn:
-        if account_username:
-            rows = conn.execute(
-                "SELECT action, COUNT(*) AS n FROM instagram_actions WHERE account_username = ? GROUP BY action",
-                (account_username,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT action, COUNT(*) AS n FROM instagram_actions GROUP BY action"
-            ).fetchall()
-    counts = {"like": 0, "save": 0}
-    for row in rows:
-        counts[row["action"]] = row["n"]
-    return counts
 
 
 # ---- Follow requests (private-account requests, any bot user) ----

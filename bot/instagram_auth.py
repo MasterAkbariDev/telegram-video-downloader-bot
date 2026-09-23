@@ -167,6 +167,23 @@ def ensure_instagram_cookies(account: dict | None = None, *, force_refresh: bool
             return get_cookies_file()
 
 
+def existing_instagram_cookies() -> str | None:
+    """Passive: return an already-present, valid cookies file for some
+    enabled account, WITHOUT ever triggering a login. Used by the anonymous
+    scrape path — that path should stay anonymous and never be the thing
+    that kicks off an account login; logging in is reserved for the
+    login-wall fallback in downloader._instagram_extract(). Falls back to
+    the generic COOKIES_FILE / data/cookies.txt if no account cookie exists.
+    """
+    for account in cfg.get_instagram_accounts():
+        if not account.get("enabled", True):
+            continue
+        cookies_path, _session_path = _account_paths(account["username"])
+        if _cookies_look_valid(cookies_path):
+            return str(cookies_path)
+    return get_cookies_file()
+
+
 def instagram_cookies_status(account: dict) -> dict:
     """Status for the admin panel: whether this account's cookies exist, look valid, and age."""
     username = account["username"]
@@ -937,74 +954,3 @@ def _write_mozilla_jar(path: Path, jar: MozillaCookieJar) -> None:
         out.set_cookie(cookie)
     out.save(ignore_discard=True, ignore_expires=True)
     tmp.replace(path)
-
-
-# A logged-in account that only ever silently fetches post data and never
-# does anything else a real person does (like, save, browse) is itself an
-# unusual, bot-shaped traffic pattern — independent of anything about the
-# login flow itself. Occasionally liking (often) and saving (rarely) the
-# post that was just fetched, through the same session, is cheap insurance
-# against that. "Often but not always" / "rarely" rather than fixed
-# thresholds, since a perfectly consistent rate is its own tell.
-_LIKE_PROBABILITY = 0.55
-_SAVE_PROBABILITY = 0.07
-
-
-def maybe_humanize_instagram_activity(url: str, account: dict | None = None) -> None:
-    """Best-effort, fire-and-forget: occasionally like/save the post at
-    `url` using a logged-in session, so that account's activity looks like
-    it belongs to someone actually using the app, not just a scraper.
-    `account` defaults to a random enabled account when omitted — it does
-    NOT need to be the same account that actually fetched the post; what
-    matters is each account showing a normal mix of activity over time, not
-    that any one post's fetch and like/save came from the same session.
-    No-op if there's no working login session for the chosen account. Never
-    raises and never blocks the caller — runs in a background thread, and
-    every failure (already liked, media now private, session hiccup, etc.)
-    is swallowed; none of this is allowed to affect the actual download.
-    """
-    if account is None:
-        account = pick_enabled_account()
-    if account is None:
-        return
-    _cookies_path, session_path = _account_paths(account["username"])
-    if not session_path.is_file():
-        return
-    do_like = random.random() < _LIKE_PROBABILITY
-    do_save = random.random() < _SAVE_PROBABILITY
-    if not do_like and not do_save:
-        return
-
-    def _run() -> None:
-        try:
-            cl = _build_client(account)
-            if not cl.user_id:
-                return
-            # A real person doesn't like/save the instant a post loads.
-            time.sleep(random.uniform(2.0, 9.0))
-            media_pk = cl.media_pk_from_url(url)
-            if do_like:
-                try:
-                    cl.media_like(media_pk)
-                    _record_instagram_action(account["username"], "like", media_pk, url)
-                except Exception as exc:
-                    logger.debug("Instagram auto-like skipped for %s: %s", url[:80], _safe_err(exc, account))
-            if do_save:
-                try:
-                    cl.media_save(media_pk)
-                    _record_instagram_action(account["username"], "save", media_pk, url)
-                except Exception as exc:
-                    logger.debug("Instagram auto-save skipped for %s: %s", url[:80], _safe_err(exc, account))
-        except Exception as exc:
-            logger.debug("Instagram humanize-activity skipped for %s: %s", url[:80], _safe_err(exc, account))
-
-    threading.Thread(target=_run, daemon=True, name="ig-humanize").start()
-
-
-def _record_instagram_action(username: str, action: str, media_pk, url: str) -> None:
-    try:
-        from bot.stats import record_instagram_action
-
-        record_instagram_action(username, action, str(media_pk), url)
-    except Exception as exc:
-        logger.debug("Could not record Instagram %s action for stats: %s", action, exc)

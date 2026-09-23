@@ -177,11 +177,6 @@ def resolve_media(
     url = _normalize_media_url(url)
     quality_download = max_height is not None
 
-    if _is_instagram_url(url):
-        from bot.instagram_auth import maybe_humanize_instagram_activity
-
-        maybe_humanize_instagram_activity(url)
-
     # Spotify is DRM in yt-dlp — resolve via SoundCloud / mirrors instead
     if (
         not force_audio
@@ -502,24 +497,6 @@ def resolve_media(
             except Exception as fb_exc:
                 _cleanup_job_dir(fallback_dir)
                 logger.warning("Fallback failed for %s: %s", url, fb_exc)
-
-        # Last resort for login-walled Instagram posts: a paid managed
-        # API (runs its own residential-proxy + account pool), tried only
-        # after every free path has failed.
-        if _is_instagram_url(url) and not force_audio:
-            from bot.hikerapi import hikerapi_configured, resolve_via_hikerapi
-
-            if hikerapi_configured():
-                try:
-                    hiker_result = resolve_via_hikerapi(
-                        url,
-                        progress_callback=progress_callback,
-                        cancel_check=cancel_check,
-                    )
-                    if hiker_result:
-                        return hiker_result
-                except Exception as hiker_exc:
-                    logger.warning("HikerAPI fallback failed for %s: %s", url, hiker_exc)
 
         if is_youtube_bot_check(exc):
             logger.warning(
@@ -1240,10 +1217,16 @@ def _instagram_extract(
     progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
 ) -> dict:
-    from bot.instagram_auth import ensure_instagram_cookies, refresh_instagram_cookies
+    from bot.instagram_auth import (
+        existing_instagram_cookies,
+        refresh_instagram_cookies,
+    )
 
-    # Prefer auto-login cookies when INSTAGRAM_USERNAME/PASSWORD are set
-    ig_cookies = ensure_instagram_cookies()
+    # Try anonymously first (only cookies already on disk, never a login) —
+    # accounts are a last resort, used only after this fails with a login
+    # wall. This keeps automated logins off the normal public-post path,
+    # which is what draws Instagram's automated-behaviour flags.
+    ig_cookies = existing_instagram_cookies()
     if ig_cookies:
         opts = {**opts, "cookiefile": ig_cookies}
 
@@ -1345,37 +1328,11 @@ def is_instagram_login_required(exc: BaseException | str) -> bool:
 
 
 def instagram_login_hint() -> str:
-    from bot.hikerapi import hikerapi_configured
-    from bot.instagram_auth import instagram_credentials_configured
+    """Shown to whoever sent the link — usually not the admin, so no
+    server-side instructions here (those go to the logs)."""
+    from bot.messages import INSTAGRAM_LOGIN_WALL_TEXT
 
-    if hikerapi_configured():
-        return (
-            "Instagram blocked this post via every free method, and the "
-            "HikerAPI fallback couldn't resolve it either (may be private, "
-            "deleted, or a transient HikerAPI error). Try again shortly."
-        )
-
-    cookies = get_cookies_file()
-    if instagram_credentials_configured():
-        return (
-            "Instagram auto-login hit a security checkpoint/2FA. "
-            "Open Instagram in a browser (same network), approve the login, "
-            "then retry — or export cookies to <code>data/cookies.txt</code>. "
-            "Setting HIKERAPI_KEY in .env avoids this entirely (see README)."
-        )
-    if cookies:
-        return (
-            "Instagram blocked anonymous access for this post (login wall). "
-            f"Refresh Instagram cookies in {cookies} from a logged-in browser, "
-            "then try again. Setting HIKERAPI_KEY in .env avoids this "
-            "entirely (see README)."
-        )
-    return (
-        "Instagram blocked anonymous access for this post. "
-        "Add an Instagram account in /admin → Instagram Accounts for auto-login, "
-        "export cookies to <code>data/cookies.txt</code>, or set HIKERAPI_KEY "
-        "for a managed API fallback (see README)."
-    )
+    return INSTAGRAM_LOGIN_WALL_TEXT
 
 
 def youtube_bot_check_hint() -> str:
