@@ -1321,6 +1321,12 @@ def is_instagram_login_required(exc: BaseException | str) -> bool:
         "empty media response" in text
         or "login required" in text
         or "rate-limit for accessing posts anonymously" in text
+        # Audience/age-restricted posts ("This content isn't available to
+        # everyone: It can't be seen by certain audiences") aren't visible
+        # anonymously but a logged-in account often can see them — route it
+        # through the account-login fallback rather than failing outright.
+        or "available to everyone" in text
+        or "certain audiences" in text
         or ("instagram" in text and "cookies" in text)
         or ("instagram" in text and "logged-in" in text)
         or ("instagram" in text and "log in" in text)

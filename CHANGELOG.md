@@ -2,6 +2,17 @@
 
 All notable changes to this bot are documented here.
 
+## 1.13.1 — 2026-09-23
+
+### Fixed
+- **Audience/age-restricted reels failed instead of trying a logged-in
+  account.** The error "This content isn't available to everyone: It can't
+  be seen by certain audiences" wasn't recognised as a login-required
+  condition, so the account-login fallback never fired and it failed
+  outright (long-standing gap, not new). It now routes through the account
+  fallback, and if that still can't see it, the user gets the normal
+  login-wall message.
+
 ## 1.13.0 — 2026-09-23
 
 ### Changed
