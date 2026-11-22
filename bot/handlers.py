@@ -1034,6 +1034,7 @@ async def _process_url(
                 progress_callback=on_progress,
                 cancel_check=cancel_check,
                 max_height=h,
+                prefer_telegram_url=True,
             ),
         )
 
@@ -1062,7 +1063,7 @@ async def _process_url(
             _record_success(update, url, result, user=user, message=message)
             return
 
-        if result.used_direct and result.direct_url:
+        if result.used_direct and result.direct_url and not result.telegram_url_fallback:
             await _edit_status(
                 status_msg,
                 url,
@@ -1115,7 +1116,7 @@ async def _process_url(
                 result = await loop.run_in_executor(None, dl_fn)
                 await _stop_progress_worker(progress_queue, worker_task)
                 media_caption = _media_caption(url, result)
-        elif result.file_path or result.is_image:
+        elif result.file_path or result.is_image or result.telegram_url_fallback:
             if result.is_image:
                 action = ChatAction.UPLOAD_PHOTO
             elif result.is_audio:

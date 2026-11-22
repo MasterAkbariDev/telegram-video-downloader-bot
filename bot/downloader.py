@@ -135,6 +135,7 @@ class MediaResult:
     is_image: bool = False
     album: list[AlbumItem] | None = None
     uploader: str | None = None
+    telegram_url_fallback: Callable[[ProgressCallback | None, CancelCheck | None], MediaResult] | None = None
 
     @property
     def needs_cleanup(self) -> bool:
@@ -160,6 +161,7 @@ def resolve_media(
     force_audio: bool = False,
     display_title: str | None = None,
     max_height: int | None = None,
+    prefer_telegram_url: bool = False,
 ) -> MediaResult:
     """Single-pass: extract once, then direct-send or download (no double fetch).
 
@@ -215,7 +217,8 @@ def resolve_media(
             from bot.instagram import resolve_instagram_post
 
             result = resolve_instagram_post(
-                url, progress_callback=progress_callback, cancel_check=cancel_check
+                url, progress_callback=progress_callback, cancel_check=cancel_check,
+                prefer_telegram_url=prefer_telegram_url,
             )
             if result:
                 return result

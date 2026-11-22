@@ -191,7 +191,7 @@ def _capture_media(ydl, url: str) -> dict:
             }
         slides.extend(items)
     username = (products[0].get("user") or {}).get("username")
-    return {"slides": slides, "uploader": username}
+    return {"slides": slides, "uploader": username, "anonymous": not ydl.params.get("cookiefile")}
 
 
 def _is_media_cdn(url: str) -> bool:
@@ -211,9 +211,10 @@ def _download_ig_image(
 def resolve_instagram_post(
     url: str, *, progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
+    prefer_telegram_url: bool = False, initial_media: dict | None = None,
 ):
     from bot.downloader import (
-        FileTooLargeError, MediaResult, _build_ydl_opts, _instagram_extract,
+        AlbumItem, FileTooLargeError, MediaResult, _build_ydl_opts, _instagram_extract,
         _instagram_failure, _log_instagram_failure, instagram_login_hint,
     )
 
@@ -221,6 +222,8 @@ def resolve_instagram_post(
     job_dir.mkdir(parents=True)
     finished = False
     started = time.monotonic()
+    is_story = bool(_STORY_PATH.fullmatch(urlsplit(url).path))
+    title = "Instagram Story" if is_story else "Instagram post"
     try:
         for attempt in (1, 2):
             opts = _build_ydl_opts(
@@ -230,7 +233,10 @@ def resolve_instagram_post(
             source = "yt-dlp-product"
             error = None
             try:
-                info = _instagram_extract(url, opts, cancel_check=cancel_check, extract_attempt=_capture_media)
+                if attempt == 1 and initial_media is not None:
+                    info = initial_media
+                else:
+                    info = _instagram_extract(url, opts, cancel_check=cancel_check, extract_attempt=_capture_media)
             except DownloadError as exc:
                 error = exc
                 info = {"slides": []}
@@ -240,7 +246,7 @@ def resolve_instagram_post(
 
             if info.get("incomplete"):
                 raise RuntimeError("Instagram did not return every item in this carousel or Story.")
-            if not info["slides"] and not _STORY_PATH.fullmatch(urlsplit(url).path):
+            if not info["slides"] and not is_story:
                 source = "public-html"
                 _, info["slides"] = scrape_instagram_slides(url, cancel_check=cancel_check)
 
@@ -251,9 +257,33 @@ def resolve_instagram_post(
                         raise RuntimeError(instagram_login_hint()) from None
                     raise RuntimeError("Instagram did not return accessible media for this link.") from None
                 return None  # A video may only have a DASH manifest.
+            slides = info["slides"]
+            # An album of up to 10 items fits in one atomic Telegram request.
+            if prefer_telegram_url and not is_story and info.get("anonymous") and len(slides) <= 10:
+                def download_fallback(on_progress, check_cancel):
+                    local = resolve_instagram_post(
+                        url, progress_callback=on_progress, cancel_check=check_cancel,
+                        initial_media=info,
+                    )
+                    if local is None:
+                        raise RuntimeError("Instagram could not refresh the media for this link.")
+                    return local
+
+                logger.info(
+                    "platform=instagram media=%s stage=resolved mode=telegram_url items=%d duration=%.2fs",
+                    instagram_identifier(url), len(slides), time.monotonic() - started,
+                )
+                return MediaResult(
+                    title=title, is_audio=False, file_size=None, used_direct=True,
+                    direct_url=slides[0].url if len(slides) == 1 else None,
+                    album=[AlbumItem(kind=slide.kind, url=slide.url) for slide in slides]
+                    if len(slides) > 1 else None,
+                    is_image=all(slide.kind == "image" for slide in slides),
+                    uploader=info.get("uploader"), telegram_url_fallback=download_fallback,
+                )
             try:
                 album = _download_slides(
-                    info["slides"], job_dir, progress_callback, cancel_check,
+                    slides, job_dir, progress_callback, cancel_check,
                     provider="Instagram", domains=("cdninstagram.com", "fbcdn.net"),
                     referer="https://www.instagram.com/",
                 )
@@ -281,7 +311,7 @@ def resolve_instagram_post(
         single = album[0] if len(album) == 1 else None
         finished = True
         return MediaResult(
-            title="Instagram Story" if _STORY_PATH.fullmatch(urlsplit(url).path) else "Instagram post",
+            title=title,
             is_audio=False, file_size=sum(item.file_size for item in album),
             file_path=single.path if single else None, used_direct=False,
             is_image=all(item.kind == "image" for item in album),

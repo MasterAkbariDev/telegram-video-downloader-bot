@@ -2,6 +2,12 @@
 
 All notable changes to this bot are documented here.
 
+## 1.13.3 — 2026-11-22
+
+- Send eligible public Instagram posts and albums directly through Telegram.
+  On an explicit rejection, upload validated files using the already extracted
+  media URLs. Refresh those URLs once when necessary.
+
 ## 1.13.2 — 2026-11-22
 
 ### Fixed

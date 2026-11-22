@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -20,7 +21,7 @@ from bot.config import (
     TELETHON_SESSION,
     large_upload_enabled,
 )
-from bot.downloader import MediaResult
+from bot.downloader import MediaResult, cleanup_file
 
 try:
     from bot.jobs import CancelCheck, DownloadCancelledError
@@ -262,6 +263,10 @@ async def send_media(
     cancel_check: CancelCheck | None = None,
 ) -> str | None:
     """Send media and retry a rejected flood-control request once."""
+    if result.telegram_url_fallback:
+        return await _send_with_local_fallback(
+            message, result, caption, progress_callback, cancel_check,
+        )
     if result.album:
         return await _send_album(message, result, caption)
     return await _send_after_rate_limit(
@@ -270,6 +275,66 @@ async def send_media(
         ),
         cancel_check=cancel_check,
     )
+
+
+async def _send_with_local_fallback(message, result, caption, progress_callback, cancel_check):
+    started = time.monotonic()
+    if cancel_check:
+        cancel_check()
+    try:
+        receipt = await _send_after_rate_limit(
+            lambda: _send_telegram_urls(message, result, caption), cancel_check=cancel_check,
+        )
+    except BadRequest:
+        # A definite Telegram rejection can safely be retried as a file upload.
+        logger.info("Telegram URL rejected after %.2fs, uploading validated files", time.monotonic() - started)
+    else:
+        logger.info("Telegram URL delivered in %.2fs", time.monotonic() - started)
+        return receipt
+
+    builder = asyncio.create_task(asyncio.to_thread(result.telegram_url_fallback, None, cancel_check))
+    try:
+        local = await asyncio.shield(builder)
+    except asyncio.CancelledError:
+        def clean_after_cancel(task):
+            if not task.cancelled() and task.exception() is None:
+                _cleanup_media_files(task.result())
+
+        builder.add_done_callback(clean_after_cancel)
+        raise
+
+    try:
+        if cancel_check:
+            cancel_check()
+        result.file_size = local.file_size
+        return await send_media(
+            message, local, caption, progress_callback=progress_callback, cancel_check=cancel_check,
+        )
+    finally:
+        _cleanup_media_files(local)
+
+
+def _cleanup_media_files(result):
+    paths = [item.path for item in result.album] if result.album else [result.file_path]
+    for directory in {path.parent for path in paths if path is not None}:
+        cleanup_file(directory)
+
+
+async def _send_telegram_urls(message, result, caption):
+    if result.album:
+        media = _build_album_media(result.album, caption=caption)
+        sent = await message.reply_media_group(media=media, read_timeout=25)
+        if len(sent) != len(result.album):
+            raise RuntimeError("Telegram returned an incomplete album receipt.")
+        return _album_file_ids(sent)
+    kwargs = {"caption": caption, "parse_mode": ParseMode.HTML} if caption else {}
+    if result.is_image:
+        sent = await message.reply_photo(photo=result.direct_url, read_timeout=25, **kwargs)
+    else:
+        sent = await message.reply_video(
+            video=result.direct_url, supports_streaming=True, read_timeout=25, **kwargs,
+        )
+    return _file_id_from_message(sent, is_audio=False, is_photo=result.is_image)
 
 
 async def _send_single_media(
@@ -475,6 +540,10 @@ async def _send_album(
         chunk_caption = caption if i == 0 else ""
         sent_list.extend(await _send_album_chunk(message, chunk, chunk_caption))
 
+    return _album_file_ids(sent_list)
+
+
+def _album_file_ids(sent_list):
     if sent_list:
         # Prefer returning all file_ids so albums can be cached for instant re-send
         items = []
