@@ -9,7 +9,7 @@ from typing import Callable
 
 from telegram import InputFile, Message
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, RetryAfter, TelegramError
 
 from bot.config import (
     BOT_TOKEN,
@@ -241,7 +241,38 @@ async def materialize_file_id(
     return file_id, kind
 
 
+async def _send_after_rate_limit(send, *, cancel_check=None):
+    try:
+        return await send()
+    except RetryAfter as exc:
+        if exc.retry_after > 20:
+            raise
+        await asyncio.sleep(exc.retry_after)
+        if cancel_check:
+            cancel_check()
+        return await send()
+
+
 async def send_media(
+    message: Message,
+    result: MediaResult,
+    caption: str,
+    *,
+    progress_callback: UploadProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> str | None:
+    """Send media and retry a rejected flood-control request once."""
+    if result.album:
+        return await _send_album(message, result, caption)
+    return await _send_after_rate_limit(
+        lambda: _send_single_media(
+            message, result, caption, progress_callback=progress_callback, cancel_check=cancel_check,
+        ),
+        cancel_check=cancel_check,
+    )
+
+
+async def _send_single_media(
     message: Message,
     result: MediaResult,
     caption: str,
@@ -251,9 +282,6 @@ async def send_media(
 ) -> str | None:
     """Send video/audio/photo/album as a reply. Returns Telegram file_id when available."""
     parse = ParseMode.HTML if caption else None
-
-    if result.album and len(result.album) > 0:
-        return await _send_album(message, result, caption)
 
     if result.is_image and (result.file_path or result.direct_url or result.telegram_file_id):
         return await _send_photo(message, result, caption)
@@ -381,7 +409,7 @@ async def _send_album_chunk(message: Message, chunk: list, caption: str) -> list
         return []
 
     try:
-        return await message.reply_media_group(media=media_group)
+        return await _send_after_rate_limit(lambda: message.reply_media_group(media=media_group))
     except BadRequest as exc:
         logger.warning("Album chunk send failed (%s) — retrying", exc)
 
@@ -390,14 +418,14 @@ async def _send_album_chunk(message: Message, chunk: list, caption: str) -> list
     media_group = _build_album_media(materialized, caption=caption) if materialized else []
     if media_group:
         try:
-            return await message.reply_media_group(media=media_group)
+            return await _send_after_rate_limit(lambda: message.reply_media_group(media=media_group))
         except BadRequest as exc:
             logger.warning("Album chunk retry after materializing also failed (%s)", exc)
 
     bare = _build_album_media(materialized or chunk, caption="")
     if not bare:
         raise RuntimeError("No album items to send for this chunk.")
-    sent = await message.reply_media_group(media=bare)
+    sent = await _send_after_rate_limit(lambda: message.reply_media_group(media=bare))
     if caption:
         try:
             await message.reply_text(

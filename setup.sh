@@ -37,8 +37,8 @@ PY_VERSION=$($PYTHON -c 'import sys; print(f"{sys.version_info.major}.{sys.versi
 PY_MAJOR=$($PYTHON -c 'import sys; print(sys.version_info.major)')
 PY_MINOR=$($PYTHON -c 'import sys; print(sys.version_info.minor)')
 
-if [[ "$PY_MAJOR" -lt 3 ]] || [[ "$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 9 ]]; then
-    error "Python 3.9+ is required (found $PY_VERSION)."
+if [[ "$PY_MAJOR" -lt 3 ]] || [[ "$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 11 ]]; then
+    error "Python 3.11+ is required (found $PY_VERSION)."
     exit 1
 fi
 ok "Python $PY_VERSION found ($PYTHON)"

@@ -75,7 +75,11 @@ def resolve_pinterest(
     if progress_callback:
         progress_callback("📌 <b>Reading Pinterest pin…</b>")
 
-    title, image_url, video_url = scrape_pinterest_pin(url)
+    try:
+        title, image_url, video_url = scrape_pinterest_pin(url)
+    except httpx.HTTPError as exc:
+        logger.info("Pinterest page lookup failed: %s", type(exc).__name__)
+        return None
     if not image_url and not video_url:
         return None
 

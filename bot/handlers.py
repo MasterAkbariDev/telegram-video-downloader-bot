@@ -38,6 +38,7 @@ from bot.downloader import (
     thumbnail_url_from_info,
 )
 from bot import stats
+from bot.instagram import instagram_identifier, is_instagram_url
 from bot.jobs import DownloadCancelledError, register_job, request_cancel, unregister_job
 from bot.messages import detect_platform
 from bot.quality import needs_quality_picker
@@ -45,6 +46,26 @@ from bot.uploader import send_media
 from bot.urls import extract_any_urls_from_message, extract_urls_from_message
 
 logger = logging.getLogger(__name__)
+
+
+def _instagram_backup_options(url: str):
+    """Offer manual third-party alternatives for Instagram posts."""
+    from urllib.parse import urlsplit
+    import re
+
+    parsed = urlsplit(url)
+    if (parsed.hostname or "").lower() not in ("instagram.com", "www.instagram.com", "instagr.am", "www.instagr.am"):
+        return None
+    match = re.fullmatch(r"/(reel|p|tv)/([A-Za-z0-9_-]+)/?", parsed.path, re.I)
+    if not match:
+        return None
+    # Preserve share parameters, which may be needed to access a post.
+    clean_url = url if len(url) <= 1500 else f"https://www.instagram.com/{match.group(1)}/{match.group(2)}/"
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("MegaSaverBot", url="https://t.me/MegaSaverBot"),
+        InlineKeyboardButton("AllSaverBot", url="https://t.me/allsaverbot"),
+    ]])
+    return clean_url, keyboard
 
 
 def _user_start_keyboard(is_admin_user: bool) -> InlineKeyboardMarkup:
@@ -447,7 +468,8 @@ async def _inline_background_prepare(bot, user_id: int, url: str) -> None:
     from bot.uploader import materialize_file_id
 
     name, _emoji = msg.detect_platform(url)
-    logger.info("Inline prepare start user=%s url=%s", user_id, url[:100])
+    log_url = instagram_identifier(url) if is_instagram_url(url) else url[:100]
+    logger.info("Inline prepare start user=%s media=%s", user_id, log_url)
     loop = asyncio.get_running_loop()
     result = None
     try:
@@ -456,7 +478,13 @@ async def _inline_background_prepare(bot, user_id: int, url: str) -> None:
             lambda: resolve_media(url, progress_callback=None),
         )
     except Exception as exc:
-        logger.exception("Inline prepare download failed for %s", url[:80])
+        if is_instagram_url(url):
+            logger.warning(
+                "platform=instagram media=%s stage=inline category=%s",
+                log_url, type(exc).__name__,
+            )
+        else:
+            logger.exception("Inline prepare download failed for %s", log_url)
         inline_cache.mark_prepare_error(url, msg.friendly_error(str(exc)))
         return
 
@@ -1164,13 +1192,30 @@ async def _process_url(
             disable_web_page_preview=True,
         )
     except Exception as exc:
-        logger.exception("Failed to process %s", url)
+        if is_instagram_url(url):
+            logger.warning(
+                "platform=instagram media=%s stage=process category=%s",
+                instagram_identifier(url), type(exc).__name__,
+            )
+        else:
+            logger.exception("Failed to process %s", url)
         _record_failure(update, url, exc, user=user, message=message, kind="failed")
         await _stop_progress_worker(progress_queue, worker_task)
+        error_text = msg.error_message(url, msg.friendly_error(str(exc)), index=index, total=total)
+        backup = _instagram_backup_options(url)
+        if backup:
+            clean_url, keyboard = backup
+            error_text += (
+                "\n\nYou can open a backup bot and send it this link:"
+                f"\n<code>{msg.esc(clean_url)}</code>"
+            )
+        else:
+            keyboard = None
         await status_msg.edit_text(
-            msg.error_message(url, msg.friendly_error(str(exc)), index=index, total=total),
+            error_text,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
+            reply_markup=keyboard,
         )
     finally:
         progress_seen.set()
@@ -1259,6 +1304,11 @@ def _record_success(update: Update, url: str, result, *, user=None, message=None
     if not user or not chat:
         return
     platform, _ = detect_platform(url)
+    if is_instagram_url(url):
+        logger.info(
+            "platform=instagram media=%s stage=delivered items=%d",
+            instagram_identifier(url), len(result.album or []) or 1,
+        )
     stats.record_download(
         user_id=user.id,
         username=user.username,

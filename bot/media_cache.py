@@ -38,9 +38,13 @@ class CachedMedia:
 def cache_key(url: str) -> str:
     """Stable key: Instagram shortcode / Spotify id / otherwise URL hash."""
     lower = url.lower()
-    m = re.search(r"instagram\.com/(?:reel|p|tv)/([^/?#]+)", lower)
-    if m:
-        return f"ig:{m.group(1)}"
+    from bot.instagram import instagram_identifier, is_instagram_url
+
+    if is_instagram_url(url):
+        identifier = instagram_identifier(url)
+        if identifier not in {"share", "story", "unknown"}:
+            # Start fresh: the old keys lowercased case-sensitive shortcodes.
+            return f"ig2:{identifier}"
     m = re.search(r"(?:open\.)?spotify\.com/(?:track|episode)/([a-zA-Z0-9]+)", url)
     if m:
         return f"sp:{m.group(1)}"

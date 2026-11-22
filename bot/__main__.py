@@ -5,6 +5,7 @@ import logging
 import sys
 
 from telegram.error import NetworkError, TimedOut
+from yt_dlp.plugins import load_all_plugins
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -109,6 +110,8 @@ def main() -> None:
         print("ERROR: BOT_TOKEN is not set. Run ./setup.sh first.")
         sys.exit(1)
 
+    # Load once before download workers can initialize yt-dlp concurrently.
+    load_all_plugins()
     app = _build_application()
     stats.init_db()
     logger.info("Starting %s", format_version_label())

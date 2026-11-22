@@ -21,7 +21,7 @@ Works in **private chats** and **groups**. No daily limits, no queues — paste 
 
 ### Prerequisites
 
-- Python 3.9+
+- Python 3.11+ (production uses Python 3.12)
 - [ffmpeg](https://ffmpeg.org/download.html) (auto-installed on macOS/Linux when possible)
 
 ### Setup
@@ -116,6 +116,18 @@ source .venv/bin/activate
 pip install -r requirements.txt
 sudo systemctl restart telegram-bot
 ```
+
+### Verify media providers
+
+Run `python -m unittest discover -s tests -v` for the offline regression suite.
+Run `python -m tests.live_media_smoke` for live public downloads and byte-level
+validation. Use `--deliver` to send the results to the sole configured Telegram
+administrator, or `--chat-id` to select a configured administrator.
+
+Instagram uses yt-dlp's public metadata first, including original photos and the
+complete carousel. Public HTML is a fallback. Existing operator-configured
+sessions can be used when Instagram requires authorization. Story availability
+depends on Instagram and the active session.
 
 ### Server tips
 

@@ -149,8 +149,8 @@ def ensure_instagram_cookies(account: dict | None = None, *, force_refresh: bool
         # every single request wastes a full HTTP round-trip per download and
         # visibly slows the bot down. Back off until the cooldown expires.
         last_failure = _last_login_failure_at.get(username, 0.0)
-        if not force_refresh and last_failure and time.time() - last_failure < _LOGIN_FAILURE_COOLDOWN_SEC:
-            if cookies_path.is_file():
+        if last_failure and time.time() - last_failure < _LOGIN_FAILURE_COOLDOWN_SEC:
+            if _cookies_look_valid(cookies_path):
                 return str(cookies_path)
             return get_cookies_file()
 
@@ -167,21 +167,27 @@ def ensure_instagram_cookies(account: dict | None = None, *, force_refresh: bool
             return get_cookies_file()
 
 
-def existing_instagram_cookies() -> str | None:
-    """Passive: return an already-present, valid cookies file for some
-    enabled account, WITHOUT ever triggering a login. Used by the anonymous
-    scrape path — that path should stay anonymous and never be the thing
-    that kicks off an account login; logging in is reserved for the
-    login-wall fallback in downloader._instagram_extract(). Falls back to
-    the generic COOKIES_FILE / data/cookies.txt if no account cookie exists.
-    """
+def existing_instagram_cookie_files() -> list[str]:
+    """Return existing cookies for enabled accounts without logging in."""
+    paths: list[str] = []
     for account in cfg.get_instagram_accounts():
         if not account.get("enabled", True):
             continue
         cookies_path, _session_path = _account_paths(account["username"])
         if _cookies_look_valid(cookies_path):
-            return str(cookies_path)
-    return get_cookies_file()
+            path = str(cookies_path)
+            if path not in paths:
+                paths.append(path)
+    generic = get_cookies_file()
+    if generic and str(generic) not in paths:
+        paths.append(str(generic))
+    return paths
+
+
+def existing_instagram_cookies() -> str | None:
+    """Return the first existing account cookie file, without logging in."""
+    paths = existing_instagram_cookie_files()
+    return paths[0] if paths else None
 
 
 def instagram_cookies_status(account: dict) -> dict:
@@ -365,6 +371,25 @@ def _totp_code(account: dict) -> str:
     return pyotp.TOTP(secret).now()
 
 
+def _raise_key_rate_limit(exc: Exception) -> None:
+    """Expose Instagram's rate-limit response hidden by instagrapi's key error."""
+    if "did not return the password encryption key" not in str(exc).lower():
+        return
+    response = getattr(exc, "response", None)
+    if response is None:
+        return
+    try:
+        data = response.json()
+    except (ValueError, AttributeError):
+        return
+    message = str(data.get("message", "")).lower() if isinstance(data, dict) else ""
+    if "please wait a few minutes" in message:
+        raise RuntimeError(
+            "Instagram is rate-limiting login attempts from this connection. "
+            "Wait before trying again, or upload cookies from a browser session."
+        ) from exc
+
+
 def _perform_login(cl, account: dict, *, code_provider: CodeProvider | None) -> None:
     """Log `cl` in. With code_provider set, a 2FA/verification code, a
     checkpoint challenge, or Meta's age/"youth regulation" confirmation step
@@ -422,6 +447,9 @@ def _perform_login_noninteractive(cl, account: dict) -> None:
             "Instagram is rate-limiting login attempts on this account/IP — "
             "wait 15–30 minutes before it retries automatically."
         ) from exc
+    except Exception as exc:
+        _raise_key_rate_limit(exc)
+        raise
 
 
 def _perform_login_interactive(cl, account: dict, code_provider: CodeProvider) -> None:
@@ -501,6 +529,9 @@ def _perform_login_interactive(cl, account: dict, code_provider: CodeProvider) -
             "Instagram is rate-limiting login attempts on this account/IP — "
             "wait 15–30 minutes before it retries automatically."
         ) from exc
+    except Exception as exc:
+        _raise_key_rate_limit(exc)
+        raise
 
     if cl.bloks_apply_login_response(result):
         return  # logged in on the first pass, nothing more to do

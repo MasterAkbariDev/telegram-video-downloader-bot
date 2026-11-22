@@ -2,6 +2,17 @@
 
 All notable changes to this bot are documented here.
 
+## 1.13.2 — 2026-11-22
+
+### Fixed
+
+- Extract public Instagram posts anonymously before trying saved sessions.
+- Preserve original photos and carousel order, and verify files before Telegram upload.
+- Normalize Instagram URL variants and resolve share links with bounded redirects.
+- Refresh expired media URLs once, clean up incomplete downloads, and log Instagram
+  failures without signed CDN links or session information.
+- Preserve mixed X media and retry Telegram flood-control rejections once.
+
 ## 1.13.1 — 2026-09-23
 
 ### Fixed

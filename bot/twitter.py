@@ -86,48 +86,31 @@ def resolve_x_post(
     if not slides:
         return None
 
-    images = [s for s in slides if s.kind == "image"]
-    videos = [s for s in slides if s.kind == "video"]
-
-    # Video post — send best MP4 CDN URL
-    if videos:
+    if len(slides) == 1:
+        slide = slides[0]
+        image = slide.kind == "image"
         if progress_callback:
-            progress_callback("📤 <b>Sending X video…</b>")
+            progress_callback("📤 <b>Sending X media…</b>")
         return MediaResult(
             title=title,
             is_audio=False,
             file_size=None,
-            direct_url=videos[0].url,
+            direct_url=slide.url,
             used_direct=True,
+            is_image=image,
             uploader=uploader,
         )
-
-    if not images:
-        return None
 
     if progress_callback:
-        progress_callback("📤 <b>Sending X photos…</b>")
-    if len(images) == 1:
-        return MediaResult(
-            title=title,
-            is_audio=False,
-            file_size=None,
-            direct_url=images[0].url,
-            used_direct=True,
-            is_image=True,
-            uploader=uploader,
-        )
-
-    album = [
-        AlbumItem(kind="image", url=s.url, path=None, file_size=None) for s in images
-    ]
-    logger.info("X album %s: %d CDN photo(s)", tid, len(album))
+        progress_callback("📤 <b>Sending X media…</b>")
+    album = [AlbumItem(kind=slide.kind, url=slide.url) for slide in slides]
+    logger.info("X album %s: %d CDN item(s)", tid, len(album))
     return MediaResult(
         title=title,
         is_audio=False,
         file_size=None,
         used_direct=True,
-        is_image=True,
+        is_image=all(item.kind == "image" for item in album),
         album=album,
         uploader=uploader,
     )
@@ -175,7 +158,26 @@ def _fetch_tweet(tid: str) -> dict | None:
 
 
 def _slides_from_tweet(data: dict) -> list[XSlide]:
+    media = data.get("media")
+    ordered = data.get("mediaDetails") or data.get("media_extended")
+    if not ordered and isinstance(media, dict):
+        ordered = media.get("all")
     slides: list[XSlide] = []
+    for item in ordered or []:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type", "").lower()
+        url = item.get("url") or item.get("media_url_https")
+        if kind in {"photo", "image"} and url:
+            slides.append(XSlide("image", _orig_photo_url(url)))
+        elif kind in {"video", "animated_gif", "gif"}:
+            video = item.get("video_info") or item
+            url = _best_mp4_from_variants(video.get("variants") or []) or item.get("url")
+            if url:
+                slides.append(XSlide("video", url))
+    if slides and len(slides) == len(ordered):
+        return slides
+    slides = []
 
     for photo in data.get("photos") or []:
         url = photo.get("url") or photo.get("media_url_https")

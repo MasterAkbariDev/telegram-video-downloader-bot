@@ -44,7 +44,7 @@ _SUPPORTED_HOSTS = (
 _PLAIN_URL_RE = re.compile(
     r"https?://(?:www\.)?"
     r"(?:"
-    r"instagram\.com|instagr\.am|"
+    r"(?:m\.)?instagram\.com|instagr\.am|"
     r"youtube\.com|youtu\.be|m\.youtube\.com|music\.youtube\.com|"
     r"soundcloud\.com|on\.soundcloud\.com|m\.soundcloud\.com|"
     r"spotify\.com|open\.spotify\.com|"
@@ -63,7 +63,7 @@ _PLAIN_URL_RE = re.compile(
 _BARE_URL_RE = re.compile(
     r"(?:www\.)?"
     r"(?:"
-    r"instagram\.com|instagr\.am|"
+    r"(?:m\.)?instagram\.com|instagr\.am|"
     r"youtube\.com|youtu\.be|"
     r"soundcloud\.com|"
     r"spotify\.com|open\.spotify\.com|"
@@ -107,12 +107,7 @@ def extract_urls(text: str) -> list[str]:
     if not text:
         return []
 
-    found: list[str] = []
-    for match in _PLAIN_URL_RE.findall(text):
-        found.append(normalize_url(match))
-    for match in _BARE_URL_RE.findall(text):
-        found.append(normalize_url(match))
-    return _unique([u for u in found if is_supported_url(u)])
+    return _unique([url for url in _plain_urls_from_text(text, None) if is_supported_url(url)])
 
 
 def extract_urls_from_message(message: Message) -> list[str]:
@@ -180,8 +175,11 @@ def _plain_urls_from_text(
             continue
         urls.append(normalize_url(match.group(0)))
 
+    explicit_spans = [match.span() for match in _ANY_URL_RE.finditer(text)]
     for match in _BARE_URL_RE.finditer(text):
-        start, end = match.start(), match.end()
+        start, end = match.span()
+        if _overlaps_any(start, end - start, explicit_spans):
+            continue
         utf16_start = _utf16_len(text[:start])
         utf16_len = _utf16_len(match.group(0))
         if _overlaps_any(utf16_start, utf16_len, text_link_spans):

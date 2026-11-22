@@ -7,6 +7,7 @@ import logging
 import re
 import shutil
 import threading
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -71,7 +72,6 @@ _DIRECT_URL_SKIP = (
     "beeg.team",
 )
 
-_INSTAGRAM_HOSTS = ("instagram.com", "instagr.am")
 _TIKTOK_HOSTS = ("tiktok.com",)
 
 # A single shared+cached YoutubeDL instance behind a mutex used to fully
@@ -176,6 +176,11 @@ def resolve_media(
     is_yt_music = "music.youtube.com" in url.lower()
     url = _normalize_media_url(url)
     quality_download = max_height is not None
+    instagram_url = _is_instagram_url(url)
+    if instagram_url:
+        from bot.instagram import resolve_instagram_share
+
+        url = resolve_instagram_share(url, cancel_check=cancel_check)
 
     # Spotify is DRM in yt-dlp — resolve via SoundCloud / mirrors instead
     if (
@@ -189,7 +194,6 @@ def resolve_media(
             resolve_spotify_via_youtube,
             resolve_youtube_playlist_audio,
         )
-        from bot.instagram import is_instagram_url, resolve_instagram_album
         from bot.twitter import is_x_url, resolve_x_post
         from bot.pinterest import is_pinterest_url, resolve_pinterest
 
@@ -205,15 +209,14 @@ def resolve_media(
                 progress_callback=progress_callback,
                 cancel_check=cancel_check,
             )
-        # Instagram photos / carousels (yt-dlp is video-only)
-        if is_instagram_url(url):
-            album = resolve_instagram_album(
-                url,
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
+        if instagram_url:
+            from bot.instagram import resolve_instagram_post
+
+            result = resolve_instagram_post(
+                url, progress_callback=progress_callback, cancel_check=cancel_check
             )
-            if album:
-                return album
+            if result:
+                return result
         # X photos / videos via syndication CDN
         if is_x_url(url):
             post = resolve_x_post(
@@ -251,9 +254,10 @@ def resolve_media(
     # picks (needs yt-dlp's format selection), audio-only requests, and
     # internal ytsearch/scsearch queries — same guard already used above
     # for the other own-resolver-first platforms (Spotify/Instagram/X/Pinterest).
-    own_extractor_already_tried = False
+    own_extractor_already_tried = instagram_url
     if (
-        not _is_youtube_url(url)
+        not instagram_url
+        and not _is_youtube_url(url)
         and not force_audio
         and not quality_download
         and not url.startswith(("ytsearch", "scsearch"))
@@ -318,11 +322,11 @@ def resolve_media(
         title = display_title or info.get("title") or info.get("id") or "media"
         is_audio = _result_is_audio(info, url=url, audio_preferred=audio_preferred)
 
-        # Instagram: always try a progressive CDN URL so Telegram fetches it (no VPS upload)
+        # Prefer progressive CDN URLs for providers that support Telegram hotlinking.
         # Skip CDN short-circuit when user picked an explicit height.
         if not force_audio and not quality_download:
             direct_url = _direct_url_from_info(info, prefer_small=_is_instagram_url(url))
-            if direct_url and not _should_skip_direct_url(url):
+            if direct_url and not instagram_url and not _should_skip_direct_url(url):
                 est = _estimate_size(info)
                 logger.info(
                     "Trying CDN direct send for %s (size≈%s, is_audio=%s, cdn=%s)",
@@ -384,6 +388,10 @@ def resolve_media(
             info, url=url, audio_preferred=audio_preferred, path=downloaded
         )
 
+        if instagram_url and not is_audio:
+            from bot.instagram import _validate_slide
+
+            downloaded = _validate_slide(downloaded, "video")
         downloaded = _maybe_compress(
             downloaded,
             is_audio=is_audio,
@@ -411,29 +419,10 @@ def resolve_media(
         raise
     except Exception as exc:
         _cleanup_job_dir(output_dir)
-        logger.warning("yt-dlp failed for %s: %s — trying fallback", url, exc)
-
-        # Instagram image posts often fail yt-dlp ("no video formats")
-        if _is_instagram_url(url) and not force_audio:
-            try:
-                from bot.instagram import resolve_instagram_album, resolve_instagram_video
-
-                album = resolve_instagram_album(
-                    url,
-                    progress_callback=progress_callback,
-                    cancel_check=cancel_check,
-                )
-                if album:
-                    return album
-                video = resolve_instagram_video(
-                    url,
-                    progress_callback=progress_callback,
-                    cancel_check=cancel_check,
-                )
-                if video:
-                    return video
-            except Exception as ig_exc:
-                logger.warning("Instagram scrape fallback failed: %s", ig_exc)
+        if instagram_url:
+            _log_instagram_failure(url, "yt-dlp", "resolve", exc)
+        else:
+            logger.warning("yt-dlp failed for %s: %s — trying fallback", url, exc)
 
         # YouTube Music / Topic ids are often UNPLAYABLE — search for a match
         if (
@@ -505,13 +494,10 @@ def resolve_media(
                 url,
             )
             raise RuntimeError(youtube_bot_check_hint()) from exc
-        if _is_instagram_url(url) and is_instagram_login_required(exc):
-            logger.warning(
-                "Instagram login wall (cookies=%s) for %s",
-                get_cookies_file() or "none",
-                url,
-            )
-            raise RuntimeError(instagram_login_hint()) from exc
+        if instagram_url:
+            if is_instagram_login_required(exc):
+                raise RuntimeError(instagram_login_hint()) from None
+            raise RuntimeError("Instagram could not return playable media for this link.") from None
         raise exc
 
 
@@ -524,8 +510,8 @@ def download_from_info(
     max_height: int | None = None,
 ) -> MediaResult:
     """Download using a prior extract_info result — avoids slow re-lookup."""
-    # TikTok CDN URLs die without the original session cookies
-    if _is_tiktok_url(url):
+    # Re-extract time-limited CDN URLs when a direct send fails.
+    if _is_tiktok_url(url) or _is_instagram_url(url):
         return resolve_media(
             url,
             progress_callback=progress_callback,
@@ -975,6 +961,10 @@ def extract_media_info(
 ) -> dict:
     """Extract metadata only (no download) for quality listing."""
     url = _normalize_media_url(url)
+    if _is_instagram_url(url):
+        from bot.instagram import resolve_instagram_share
+
+        url = resolve_instagram_share(url, cancel_check=cancel_check)
     job_id = uuid.uuid4().hex[:12]
     output_dir = DOWNLOAD_DIR / job_id
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1085,8 +1075,9 @@ def _format_size(size_bytes: int) -> str:
 
 
 def _is_instagram_url(url: str) -> bool:
-    lower = url.lower()
-    return any(host in lower for host in _INSTAGRAM_HOSTS)
+    from bot.instagram import is_instagram_url
+
+    return is_instagram_url(url)
 
 
 def _is_youtube_url(url: str) -> bool:
@@ -1104,6 +1095,10 @@ def _is_youtube_url(url: str) -> bool:
 
 def _normalize_media_url(url: str) -> str:
     """Canonicalize known URL shapes (music.youtube → youtube, etc.)."""
+    if _is_instagram_url(url):
+        from bot.instagram import normalize_instagram_url
+
+        return normalize_instagram_url(url)
     lower = url.lower()
     if "music.youtube.com" in lower:
         # Same video id; www extractors are more reliable than music subdomain
@@ -1179,7 +1174,10 @@ def _extract_info_with_retry(
                 raise
             if attempt >= len(_RETRY_DELAYS) - 1:
                 break
-            logger.warning("Rate limited on %s — retry in %ss", url, delay)
+            if _is_instagram_url(url):
+                _log_instagram_failure(url, "yt-dlp", "retry", exc, attempt=attempt + 1)
+            else:
+                logger.warning("Rate limited on %s — retry in %ss", url, delay)
             if progress_callback:
                 progress_callback(f"⏳ <b>Rate limited — retrying in {delay}s…</b>")
             _sleep_with_cancel(delay, cancel_check)
@@ -1210,79 +1208,128 @@ def _extract_info(
         )
 
 
+class _InstagramYtdlpLogger:
+    """Prevent upstream exceptions and URLs from reaching application logs."""
+
+    def debug(self, message):
+        pass
+
+    info = warning = error = debug
+
+
+def _instagram_failure(exc: BaseException | str) -> tuple[str, int | None]:
+    message = str(exc).lower()
+    response = getattr(exc, "response", None)
+    code = getattr(response, "status_code", None)
+    match = re.search(r"http(?: error)?[ :]+([45][0-9]{2})", message)
+    if code is None and match:
+        code = int(match[1])
+    if code == 429 or "too many requests" in message:
+        return "rate_limit", code
+    if code == 401:
+        return "authentication", code
+    if "empty media response" in message:
+        return "empty_response", code
+    if is_instagram_login_required(exc):
+        return "authentication", code
+    if code in (404, 410):
+        return "unavailable", code
+    if "timeout" in message or "timed out" in message:
+        return "timeout", code
+    return ("http_error" if code else "extractor_error"), code
+
+
+def _log_instagram_failure(url, provider, stage, exc, *, attempt=1):
+    from bot.instagram import instagram_identifier
+
+    category, code = _instagram_failure(exc)
+    logger.info(
+        "platform=instagram media=%s provider=%s stage=%s category=%s http_status=%s attempt=%d",
+        instagram_identifier(url), provider, stage, category, code, attempt,
+    )
+
+
 def _instagram_extract(
     url: str,
     opts: dict,
     *,
     progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
+    extract_attempt=None,
 ) -> dict:
-    from bot.instagram_auth import (
-        existing_instagram_cookies,
-        refresh_instagram_cookies,
-    )
+    from bot.instagram_auth import existing_instagram_cookie_files, refresh_instagram_cookies
 
-    # Try anonymously first (only cookies already on disk, never a login) —
-    # accounts are a last resort, used only after this fails with a login
-    # wall. This keeps automated logins off the normal public-post path,
-    # which is what draws Instagram's automated-behaviour flags.
-    ig_cookies = existing_instagram_cookies()
-    if ig_cookies:
-        opts = {**opts, "cookiefile": ig_cookies}
+    anonymous_opts = {**opts, "logger": _InstagramYtdlpLogger()}
+    configured = anonymous_opts.pop("cookiefile", None)
+    anonymous_opts.pop("cookiesfrombrowser", None)
+
+    def run(cookie_file=None):
+        if cancel_check:
+            cancel_check()
+        _instagram_throttle()
+        attempt_opts = anonymous_opts.copy()
+        if not cookie_file:
+            return extract(attempt_opts)
+        # yt-dlp rewrites its cookie file on close. Use a per-request copy
+        # so a rejected session cannot overwrite saved credentials.
+        with tempfile.TemporaryDirectory(prefix="instagram-") as temp:
+            copy_path = Path(temp) / "cookies.txt"
+            shutil.copyfile(cookie_file, copy_path)
+            attempt_opts["cookiefile"] = str(copy_path)
+            return extract(attempt_opts)
+
+    def extract(attempt_opts):
+        with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+            if extract_attempt:
+                return extract_attempt(ydl, url)
+            return _extract_info_with_retry(
+                ydl, url, progress_callback=progress_callback, cancel_check=cancel_check
+            )
 
     with _instagram_semaphore:
-        _instagram_throttle()
-        ydl = yt_dlp.YoutubeDL(opts)
         try:
+            return run()
+        except DownloadError as exc:
+            category, status = _instagram_failure(exc)
+            _log_instagram_failure(url, "anonymous", "extract", exc)
+            if category not in {"authentication", "empty_response"} and status not in {400, 403}:
+                raise
+            first_error = exc
+
+        saved = existing_instagram_cookie_files()
+        if configured and configured not in saved:
+            saved.append(configured)
+        for attempt, cookie in enumerate(saved[:3], start=1):
             try:
-                return _extract_info_with_retry(
-                    ydl,
-                    url,
-                    progress_callback=progress_callback,
-                    cancel_check=cancel_check,
-                )
+                return run(cookie)
+            except OSError as exc:
+                _log_instagram_failure(url, "saved-session", "read", exc, attempt=attempt)
             except DownloadError as exc:
-                if not is_instagram_login_required(exc):
+                saved_category, _ = _instagram_failure(exc)
+                _log_instagram_failure(url, "saved-session", "extract", exc, attempt=attempt)
+                if saved_category == "rate_limit":
                     raise
 
-                # "Instagram sent an empty media response" specifically is
-                # often a transient API hiccup, not a real login wall —
-                # confirmed live against a real post: a plain retry with the
-                # exact same (or no) cookies succeeded outright for content
-                # that a forced re-login then wrongly assumed needed
-                # authentication, burning ~40s on two doomed login attempts
-                # (and hammering whatever account happens to be configured,
-                # even when it isn't the actual problem) before giving up
-                # with a misleading "needs login" message. Try once more,
-                # cheaply, before escalating to that expensive path.
-                if "empty media response" in str(exc).lower():
-                    try:
-                        time.sleep(2.0)
-                        return _extract_info_with_retry(
-                            ydl,
-                            url,
-                            progress_callback=progress_callback,
-                            cancel_check=cancel_check,
-                        )
-                    except DownloadError:
-                        pass  # genuinely needs the login escalation below
-
-                # Session expired / login wall — refresh once and retry
-                logger.warning("Instagram auth failed — refreshing auto-login cookies")
-                refreshed = refresh_instagram_cookies()
-                if not refreshed:
-                    raise
-                opts = {**opts, "cookiefile": refreshed}
-                ydl.close()
-                ydl = yt_dlp.YoutubeDL(opts)
-                return _extract_info_with_retry(
-                    ydl,
-                    url,
-                    progress_callback=progress_callback,
-                    cancel_check=cancel_check,
-                )
-        finally:
-            ydl.close()
+        # Refresh only on an explicit login challenge. An empty public
+        # response also occurs on deleted or stale links.
+        if category == "authentication":
+            if cancel_check:
+                cancel_check()
+            original_mtimes = {}
+            for cookie in saved:
+                try:
+                    original_mtimes[cookie] = Path(cookie).stat().st_mtime_ns
+                except OSError:
+                    continue
+            refreshed = refresh_instagram_cookies()
+            if refreshed:
+                try:
+                    changed = original_mtimes.get(refreshed) != Path(refreshed).stat().st_mtime_ns
+                    if changed:
+                        return run(refreshed)
+                except OSError as exc:
+                    _log_instagram_failure(url, "refreshed-session", "read", exc)
+        raise first_error
 
 
 def _apply_network_opts(opts: dict) -> None:
@@ -1320,6 +1367,12 @@ def is_instagram_login_required(exc: BaseException | str) -> bool:
     return (
         "empty media response" in text
         or "login required" in text
+        or "this content is unreachable" in text
+        or "only available for registered users" in text
+        or "restricted video" in text
+        # Instagram may reject an expired or invalid session with a generic
+        # HTTP 401 instead of an explicit login-required message.
+        or ("instagram" in text and "http error 401" in text)
         or "rate-limit for accessing posts anonymously" in text
         # Audience/age-restricted posts ("This content isn't available to
         # everyone: It can't be seen by certain audiences") aren't visible
@@ -1418,7 +1471,8 @@ def _build_ydl_opts(
     # Keep Instagram polite but don't add a full second between every request
     if url and _is_instagram_url(url):
         opts["sleep_interval_requests"] = 0
-        opts["socket_timeout"] = 15
+        opts["socket_timeout"] = 12
+        opts["extractor_retries"] = 0
 
     if audio_preferred:
         opts["postprocessors"] = [

@@ -1,4 +1,4 @@
-"""Instagram image / carousel extraction (yt-dlp is video-only)."""
+"""Resolve and download the original media from Instagram posts and Stories."""
 
 from __future__ import annotations
 
@@ -6,31 +6,32 @@ import html
 import json
 import logging
 import re
+import shutil
+import subprocess
+import threading
+import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from urllib.parse import unquote
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
+from yt_dlp.extractor.instagram import InstagramIE, InstagramStoryIE
+from yt_dlp.utils import DownloadError
 
-from bot.config import DOWNLOAD_DIR, YTDLP_PROXY, get_cookies_file
+from bot.config import DOWNLOAD_DIR, YTDLP_PROXY
 from bot.fast_download import DESKTOP_UA, download_http, make_client
 
 try:
-    from bot.jobs import CancelCheck
+    from bot.jobs import CancelCheck, DownloadCancelledError
 except ImportError:  # pragma: no cover
     CancelCheck = Callable[[], None]
+    DownloadCancelledError = RuntimeError
 
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str], None]
-
-_MOBILE_UA = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-)
 
 _OG_IMAGE_RE = re.compile(
     r'<meta[^>]+property=["\']og:image(?::url|:secure_url)?["\'][^>]+content=["\']([^"\']+)["\']',
@@ -61,344 +62,363 @@ class IgSlide:
     url: str
 
 
+_POST_PATH = re.compile(
+    r"^/(?:[A-Za-z0-9_.]+/)?(?P<kind>p|reels?|tv)/(?P<code>[A-Za-z0-9_-]+)"
+    r"(?:/embed(?:/captioned)?)?/?$", re.IGNORECASE
+)
+_STORY_PATH = re.compile(r"^/stories/[A-Za-z0-9_.]+(?:/(?P<id>[0-9]+))?/?$", re.IGNORECASE)
+_DOWNLOAD_SLOTS = threading.BoundedSemaphore(2)
+_SHARE_PATH = re.compile(r"^/share/(?:(?:p|reel|reels)/)?[A-Za-z0-9_-]+/?$", re.IGNORECASE)
+
+
 def is_instagram_url(url: str) -> bool:
-    lower = url.lower()
-    return "instagram.com" in lower or "instagr.am" in lower
+    try:
+        parsed = urlsplit(url)
+        return (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname in {
+                "instagram.com", "www.instagram.com", "m.instagram.com",
+                "instagr.am", "www.instagr.am", "l.instagram.com",
+            }
+            and parsed.username is None
+            and parsed.port in {None, 80, 443}
+        )
+    except ValueError:
+        return False
+
+
+def normalize_instagram_url(url: str) -> str:
+    if not is_instagram_url(url):
+        return url
+    parsed = urlsplit(url)
+    if _STORY_PATH.fullmatch(parsed.path) or _SHARE_PATH.fullmatch(parsed.path):
+        return urlunsplit(("https", "www.instagram.com", parsed.path, parsed.query, ""))
+    match = _POST_PATH.fullmatch(parsed.path)
+    if match:
+        kind = match["kind"].lower().removesuffix("s")
+        return urlunsplit(("https", "www.instagram.com", f"/{kind}/{match['code']}/", parsed.query, ""))
+    return url
+
+
+def instagram_identifier(url: str) -> str:
+    path = urlsplit(url).path
+    if _SHARE_PATH.fullmatch(path):
+        return "share"
+    story = _STORY_PATH.fullmatch(path)
+    if story:
+        return f"story-{story['id']}" if story["id"] else "story"
+    post = _POST_PATH.fullmatch(path)
+    return post["code"] if post else "unknown"
+
+
+def resolve_instagram_share(url: str, *, cancel_check: CancelCheck | None = None) -> str:
+    path = urlsplit(url).path
+    if not _SHARE_PATH.fullmatch(path):
+        if _POST_PATH.fullmatch(path) or _STORY_PATH.fullmatch(path):
+            return url
+        raise RuntimeError("Send a link to an Instagram post, Reel, or Story.")
+    try:
+        with httpx.Client(proxy=YTDLP_PROXY, timeout=15.0) as client:
+            for _ in range(4):
+                if cancel_check:
+                    cancel_check()
+                # The desktop web client may receive a JavaScript shell.
+                # Follow the HTTP redirect served to a plain link request.
+                with client.stream("GET", url) as response:
+                    location = response.headers.get("location")
+                    if not response.is_redirect or not location:
+                        break
+                    target = urljoin(url, location)
+                    if not is_instagram_url(target) or urlsplit(target).scheme != "https":
+                        break
+                    url = normalize_instagram_url(target)
+                    path = urlsplit(url).path
+                    if _POST_PATH.fullmatch(path) or _STORY_PATH.fullmatch(path):
+                        return url
+                    if not _SHARE_PATH.fullmatch(path):
+                        break
+    except httpx.HTTPError:
+        pass
+    raise RuntimeError("Instagram could not resolve this shared link. Try the original post link.")
+
+
+class _CaptureMedia:
+    """Read the product yt-dlp receives before its video-only conversion."""
+
+    def __init__(self):
+        super().__init__()
+        self.products = []
+
+    def _extract_product(self, product_info, *args, **kwargs):
+        self.products.append(product_info)
+        return super()._extract_product(product_info, *args, **kwargs)
+
+
+class _CapturePostIE(_CaptureMedia, InstagramIE):
+    pass
+
+
+class _CaptureStoryIE(_CaptureMedia, InstagramStoryIE):
+    pass
+
+
+def _capture_media(ydl, url: str) -> dict:
+    story = _STORY_PATH.fullmatch(urlsplit(url).path)
+    extractor = _CaptureStoryIE() if story else _CapturePostIE()
+    ydl.add_info_extractor(extractor)
+    try:
+        ydl.extract_info(url, download=False, process=False, ie_key=extractor.ie_key())
+    except DownloadError:
+        if not extractor.products:
+            raise
+
+    products = extractor.products
+    if story and story["id"] and not urlsplit(url).path.startswith("/stories/highlights/"):
+        products = [
+            product for product in products
+            if str(product.get("pk") or product.get("id", "")).split("_", 1)[0] == story["id"]
+        ]
+    if not products:
+        raise DownloadError("Instagram did not return the requested media.")
+
+    slides = []
+    for product in products:
+        items = _slides_from_media_object(product)
+        if not items or any(not _is_media_cdn(item.url) for item in items):
+            return {
+                "slides": [],
+                "incomplete": bool(product.get("carousel_media") or
+                                   product.get("edge_sidecar_to_children") or
+                                   product.get("media_type") == 8 or len(products) > 1),
+            }
+        slides.extend(items)
+    username = (products[0].get("user") or {}).get("username")
+    return {"slides": slides, "uploader": username}
+
+
+def _is_media_cdn(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname or ""
+        return (
+            parsed.scheme == "https"
+            and parsed.username is None
+            and parsed.port in {None, 443}
+            and any(host == domain or host.endswith("." + domain)
+                    for domain in ("cdninstagram.com", "fbcdn.net"))
+        )
+    except ValueError:
+        return False
 
 
 def _download_ig_image(
-    url: str,
-    dest: Path,
-    *,
-    referer: str,
-    accept: str,
-    client: httpx.Client | None = None,
+    url: str, dest: Path, *, referer: str, accept: str, client: httpx.Client | None = None,
 ) -> None:
-    """Single GET for Instagram photos — no HEAD probe."""
-    headers = {
-        "User-Agent": DESKTOP_UA,
-        "Accept": accept,
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": referer,
-    }
     if client is not None:
-        resp = client.get(url, headers=headers)
-        resp.raise_for_status()
-        dest.write_bytes(resp.content)
-        return
-    with make_client() as owned:
-        resp = owned.get(url, headers=headers)
-        resp.raise_for_status()
-        dest.write_bytes(resp.content)
+        download_http(client, url, dest, referer=referer, extra_headers={"Accept": accept}, skip_probe=True)
+    else:
+        with make_client() as owned:
+            _download_ig_image(url, dest, referer=referer, accept=accept, client=owned)
 
 
-def resolve_instagram_album(
-    url: str,
-    *,
-    progress_callback: ProgressCallback | None = None,
-    cancel_check: CancelCheck | None = None,
-):
-    """
-    Download Instagram photo / carousel posts.
+def _download_slides(slides, directory, progress_callback, cancel_check):
+    from bot.downloader import AlbumItem, FileTooLargeError, _maybe_compress
+    from bot.config import STANDARD_UPLOAD_LIMIT, get_download_size_cap, get_max_file_size
 
-    Returns MediaResult with album items, or None if this looks like a
-    single-video reel that yt-dlp should handle.
-    """
-    from bot.downloader import AlbumItem, MediaResult
-
-    # Reels / IGTV are always video — never scrape posters as photos
-    if re.search(r"instagram\.com/(?:reel|tv)/", url, re.IGNORECASE):
-        return None
-
-    if cancel_check:
-        cancel_check()
+    if len(slides) > 20:
+        raise RuntimeError("Instagram returned too many items in one link.")
     if progress_callback:
-        progress_callback("📸 <b>Checking for Instagram photos…</b>")
-
-    _title, slides = scrape_instagram_slides(url)
-    if not slides:
-        return None
-
-    images = [s for s in slides if s.kind == "image"]
-    videos = [s for s in slides if s.kind == "video"]
-
-    # Single video / reel → leave to yt-dlp
-    if not images and len(videos) <= 1:
-        return None
-
-    # No cap here — Telegram allows 10 items per media group, but the
-    # uploader (bot/uploader.py) splits longer albums across multiple
-    # messages, so the full carousel (Instagram allows up to 20) gets sent.
-    only_images = all(s.kind == "image" for s in slides)
-
-    # Prefer CDN URLs — Telegram can fetch Instagram CDN directly (much faster)
-    if only_images:
-        if progress_callback:
-            progress_callback("📤 <b>Sending Instagram photos…</b>")
-        if len(slides) == 1:
-            return MediaResult(
-                title="Instagram post",
-                is_audio=False,
-                file_size=None,
-                direct_url=slides[0].url,
-                used_direct=True,
-                is_image=True,
-                uploader=_uploader_from_instagram_url(url),
-            )
-        album = [
-            AlbumItem(kind="image", url=s.url, path=None, file_size=None)
-            for s in slides
-        ]
-        logger.info(
-            "Instagram album %s: %d CDN URL(s) (no VPS download)",
-            url[:80],
-            len(album),
-        )
-        return MediaResult(
-            title="Instagram post",
-            is_audio=False,
-            file_size=None,
-            used_direct=True,
-            is_image=True,
-            album=album,
-            uploader=_uploader_from_instagram_url(url),
-        )
-
-    # Mixed image+video carousels: download to disk (CDN video hotlink is flaky)
-    if progress_callback:
-        n = len(slides)
-        progress_callback(f"⬇️ <b>Downloading {n} Instagram media…</b>")
-
-    job_id = uuid.uuid4().hex[:12]
-    output_dir = DOWNLOAD_DIR / job_id
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    album: list[AlbumItem] = []
-    try:
-        workers = min(8, len(slides))
-        results: list[AlbumItem | None] = [None] * len(slides)
-
-        with make_client() as shared_client:
-
-            def _one(index: int, slide: IgSlide) -> AlbumItem | None:
-                if cancel_check:
-                    cancel_check()
-                ext = "mp4" if slide.kind == "video" else "jpg"
-                dest = output_dir / f"slide_{index:02d}.{ext}"
-                accept = (
-                    "video/mp4,video/*,*/*;q=0.8"
-                    if slide.kind == "video"
-                    else "image/jpeg,image/jpg,image/png,image/*,*/*;q=0.8"
+        progress_callback(f"⬇️ <b>Downloading {len(slides)} Instagram media item(s)…</b>")
+    album = []
+    total_size = 0
+    is_album = len(slides) > 1
+    job_limit = min(get_download_size_cap(), 200 * 1024 * 1024) if is_album else get_download_size_cap()
+    video_limit = STANDARD_UPLOAD_LIMIT if is_album else job_limit
+    # Instagram CDN links are signed. Avoid forwarding any saved session
+    # cookies and validate the redirect target before each request.
+    with httpx.Client(
+        proxy=YTDLP_PROXY, timeout=12.0, follow_redirects=False,
+        headers={"User-Agent": DESKTOP_UA},
+    ) as client:
+        for index, slide in enumerate(slides, start=1):
+            if cancel_check:
+                cancel_check()
+            current_url = slide.url
+            for _ in range(4):
+                if not _is_media_cdn(current_url):
+                    raise RuntimeError("Instagram returned an unexpected media host.")
+                with client.stream("GET", current_url, headers={"Referer": "https://www.instagram.com/"}) as response:
+                    if response.is_redirect and "location" in response.headers:
+                        current_url = urljoin(current_url, response.headers["location"])
+                        continue
+                    response.raise_for_status()
+                    extension = "mp4" if slide.kind == "video" else "image"
+                    destination = directory / f"slide_{index:02d}.{extension}"
+                    item_size = 0
+                    item_limit = min(job_limit, 10 * 1024 * 1024 if slide.kind == "image" else video_limit)
+                    with destination.open("wb") as output:
+                        for chunk in response.iter_bytes(128 * 1024):
+                            if cancel_check:
+                                cancel_check()
+                            total_size += len(chunk)
+                            item_size += len(chunk)
+                            if total_size > job_limit or item_size > item_limit:
+                                raise FileTooLargeError(max(item_size, total_size))
+                            output.write(chunk)
+                    break
+            else:
+                raise RuntimeError("Instagram returned too many media redirects.")
+            destination = _validate_slide(destination, slide.kind)
+            if not is_album and slide.kind == "video" and destination.stat().st_size > get_max_file_size():
+                destination = _maybe_compress(
+                    destination, is_audio=False, progress_callback=progress_callback, cancel_check=cancel_check,
                 )
-                try:
-                    if slide.kind == "image":
-                        _download_ig_image(
-                            slide.url,
-                            dest,
-                            referer=url,
-                            accept=accept,
-                            client=shared_client,
-                        )
-                    else:
-                        download_http(
-                            shared_client,
-                            slide.url,
-                            dest,
-                            referer=url,
-                            extra_headers={"Accept": accept},
-                            progress_callback=None,
-                            cancel_check=cancel_check,
-                            skip_probe=True,
-                        )
-                except Exception as exc:
-                    logger.warning("Instagram slide %s failed: %s", index, exc)
-                    return None
+            size = destination.stat().st_size
+            if size > get_max_file_size() or (slide.kind == "image" and size > 10 * 1024 * 1024):
+                raise FileTooLargeError(size)
+            album.append(AlbumItem(kind=slide.kind, path=destination, file_size=size))
+    return album
 
-                size = dest.stat().st_size
-                if size < 2_000:
-                    dest.unlink(missing_ok=True)
-                    return None
-                kind = slide.kind
-                if kind == "video" and _file_looks_like_image(dest):
-                    logger.warning("Dropping video slide that is actually an image poster")
-                    dest.unlink(missing_ok=True)
-                    return None
-                if kind == "image" and _file_looks_like_video(dest):
-                    kind = "video"
-                    new_dest = dest.with_suffix(".mp4")
-                    dest.rename(new_dest)
-                    dest = new_dest
-                if kind == "image":
-                    dest = _ensure_telegram_photo(dest) or dest
-                    size = dest.stat().st_size
-                return AlbumItem(kind=kind, path=dest, url=slide.url, file_size=size)
 
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {
-                    pool.submit(_one, i, slide): i
-                    for i, slide in enumerate(slides, start=1)
-                }
-                for fut in as_completed(futures):
-                    idx = futures[fut]
-                    try:
-                        item = fut.result()
-                    except Exception as exc:
-                        logger.warning("Instagram slide worker failed: %s", exc)
-                        item = None
-                    results[idx - 1] = item
+def _validate_slide(path: Path, kind: str) -> Path:
+    if kind == "image":
+        from PIL import Image
 
-        album = [item for item in results if item is not None]
-        if not album:
-            _cleanup_dir(output_dir)
-            return None
+        with Image.open(path) as image:
+            if image.width * image.height > 25_000_000:
+                raise RuntimeError("Instagram returned an oversized image.")
+            image.verify()
+            image_format = image.format
+        if image_format in {"JPEG", "PNG"}:
+            return path.rename(path.with_suffix(".jpg" if image_format == "JPEG" else ".png"))
+        converted = path.with_suffix(".jpg")
+        with Image.open(path) as image:
+            image.convert("RGB").save(converted, format="JPEG", quality=92)
+        path.unlink()
+        return converted
 
-        logger.info(
-            "Instagram album %s: %d item(s) (%s)",
-            url[:80],
-            len(album),
-            ",".join(a.kind for a in album),
+    if not _file_looks_like_video(path):
+        raise RuntimeError("Instagram returned an invalid video file.")
+    if ffprobe := shutil.which("ffprobe"):
+        probe = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=codec_type", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=12,
         )
-        if len(album) == 1:
-            item = album[0]
-            return MediaResult(
-                title="Instagram post",
-                is_audio=False,
-                file_size=item.file_size,
-                file_path=item.path,
-                used_direct=False,
-                is_image=item.kind == "image",
-                uploader=_uploader_from_instagram_url(url),
-            )
-        return MediaResult(
-            # Never use Instagram og:title (full caption + hashtags) as media title
-            title="Instagram post",
-            is_audio=False,
-            file_size=sum((a.file_size or 0) for a in album) or None,
-            file_path=None,
-            used_direct=False,
-            is_image=all(a.kind == "image" for a in album),
-            album=album,
-            uploader=_uploader_from_instagram_url(url),
-        )
-    except Exception:
-        _cleanup_dir(output_dir)
-        raise
+        if probe.returncode or "video" not in probe.stdout.splitlines():
+            raise RuntimeError("Instagram returned a file without a valid video stream.")
+    return path
 
 
-def resolve_instagram_video(
-    url: str,
-    *,
-    progress_callback: ProgressCallback | None = None,
+def resolve_instagram_post(
+    url: str, *, progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
 ):
-    """
-    Best-effort single-video CDN resolve for reels/posts when yt-dlp fails.
-
-    Returns MediaResult with a progressive CDN URL, or None.
-    """
-    from bot.downloader import MediaResult
-
-    if cancel_check:
-        cancel_check()
-    if progress_callback:
-        progress_callback("📸 <b>Trying Instagram page scrape…</b>")
-
-    _title, slides = scrape_instagram_slides(url)
-    videos = [s for s in slides if s.kind == "video"]
-    if not videos:
-        return None
-
-    video_url = videos[0].url
-    logger.info("Instagram video scrape hit for %s → %s", url[:80], video_url[:100])
-    if progress_callback:
-        progress_callback("📤 <b>Sending Instagram video…</b>")
-    return MediaResult(
-        title="Instagram post",
-        is_audio=False,
-        file_size=None,
-        direct_url=video_url,
-        used_direct=True,
-        is_image=False,
-        uploader=_uploader_from_instagram_url(url),
+    from bot.downloader import (
+        FileTooLargeError, MediaResult, _build_ydl_opts, _instagram_extract,
+        _instagram_failure, _log_instagram_failure, instagram_login_hint,
     )
 
+    job_dir = DOWNLOAD_DIR / uuid.uuid4().hex[:12]
+    job_dir.mkdir(parents=True)
+    finished = False
+    started = time.monotonic()
+    try:
+        for attempt in (1, 2):
+            opts = _build_ydl_opts(
+                audio_preferred=False, output_dir=job_dir, url=url,
+                progress_callback=progress_callback, cancel_check=cancel_check,
+            )
+            source = "yt-dlp-product"
+            error = None
+            try:
+                info = _instagram_extract(url, opts, cancel_check=cancel_check, extract_attempt=_capture_media)
+            except DownloadError as exc:
+                error = exc
+                info = {"slides": []}
+                category, _ = _instagram_failure(exc)
+                if category == "rate_limit":
+                    raise RuntimeError("Instagram is rate-limiting requests. Try again later.") from None
 
-def scrape_instagram_slides(url: str) -> tuple[str, list[IgSlide]]:
-    shortcode = _shortcode(url)
-    # Prefer the original URL first (usually has the full carousel JSON)
-    page_urls = [url]
-    if shortcode:
-        page_urls.extend(
-            [
-                f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
-                f"https://www.instagram.com/p/{shortcode}/embed/",
-                f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis",
-                f"https://www.instagram.com/reel/{shortcode}/embed/captioned/",
-            ]
-        )
-    cookies = _load_cookie_header()
-    header_sets = [
-        {
-            "User-Agent": _MOBILE_UA,
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
-        {
-            "User-Agent": DESKTOP_UA,
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
-    ]
-    if cookies:
-        for h in header_sets:
-            h["Cookie"] = cookies
+            if info.get("incomplete"):
+                raise RuntimeError("Instagram did not return every item in this carousel or Story.")
+            if not info["slides"] and not _STORY_PATH.fullmatch(urlsplit(url).path):
+                source = "public-html"
+                _, info["slides"] = scrape_instagram_slides(url, cancel_check=cancel_check)
 
-    title = ""
-    best: list[IgSlide] = []
-
-    with httpx.Client(
-        headers={"User-Agent": DESKTOP_UA},
-        proxy=YTDLP_PROXY,
-        timeout=15.0,
-        follow_redirects=True,
-    ) as client:
-        for page_i, page_url in enumerate(page_urls):
-            for headers in header_sets:
+            if not info["slides"]:
+                if error:
+                    category, _ = _instagram_failure(error)
+                    if category == "authentication":
+                        raise RuntimeError(instagram_login_hint()) from None
+                    raise RuntimeError("Instagram did not return accessible media for this link.") from None
+                return None  # A video may only have a DASH manifest.
+            try:
+                while not _DOWNLOAD_SLOTS.acquire(timeout=0.25):
+                    if cancel_check:
+                        cancel_check()
                 try:
-                    resp = client.get(page_url, headers=headers)
-                    if resp.status_code >= 400:
+                    album = _download_slides(info["slides"], job_dir, progress_callback, cancel_check)
+                finally:
+                    _DOWNLOAD_SLOTS.release()
+            except (DownloadCancelledError, FileTooLargeError):
+                raise
+            except (httpx.HTTPError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                _log_instagram_failure(url, source, "download", exc, attempt=attempt)
+                category, code = _instagram_failure(exc)
+                if attempt == 1 and (code in {401, 403, 404, 410, 500, 502, 503, 504}
+                                     or isinstance(exc, httpx.TransportError)):
+                    _cleanup_dir(job_dir)
+                    job_dir.mkdir()
+                    if cancel_check:
+                        cancel_check()
+                    continue
+                if category == "rate_limit":
+                    raise RuntimeError("Instagram is rate-limiting requests. Try again later.") from None
+                raise RuntimeError("Instagram media could not be downloaded and validated.") from None
+            break
+
+        logger.info(
+            "platform=instagram media=%s provider=%s stage=validated items=%d duration=%.2fs",
+            instagram_identifier(url), source, len(album), time.monotonic() - started,
+        )
+        single = album[0] if len(album) == 1 else None
+        finished = True
+        return MediaResult(
+            title="Instagram Story" if _STORY_PATH.fullmatch(urlsplit(url).path) else "Instagram post",
+            is_audio=False, file_size=sum(item.file_size for item in album),
+            file_path=single.path if single else None, used_direct=False,
+            is_image=all(item.kind == "image" for item in album),
+            album=None if single else album, uploader=info.get("uploader"),
+        )
+    finally:
+        if not finished:
+            _cleanup_dir(job_dir)
+
+
+def scrape_instagram_slides(
+    url: str, *, cancel_check: CancelCheck | None = None,
+) -> tuple[str, list[IgSlide]]:
+    pages = [url, urlunsplit(("https", "www.instagram.com", urlsplit(url).path + "embed/", "", ""))]
+    with httpx.Client(proxy=YTDLP_PROXY, timeout=7.0) as client:
+        for page in pages:
+            if cancel_check:
+                cancel_check()
+            try:
+                response = client.get(page, headers={"User-Agent": DESKTOP_UA})
+                if response.status_code == 429:
+                    break
+                if response.status_code != 200:
+                    continue
+                slides = _slides_from_html(response.text)
+                if slides and all(_is_media_cdn(slide.url) for slide in slides):
+                    path = urlsplit(url).path
+                    if re.match(r"^/(reel|tv)/", path) and not any(s.kind == "video" for s in slides):
                         continue
-                    text = resp.text
-                    # Some __a=1 responses are pure JSON
-                    if text.lstrip().startswith("{"):
-                        try:
-                            data = json.loads(text)
-                            slides = _slides_from_media_object(
-                                data.get("graphql", {}).get("shortcode_media")
-                                or data.get("items", [None])[0]
-                                or data
-                            )
-                        except (json.JSONDecodeError, TypeError, IndexError):
-                            slides = _slides_from_html(text)
-                    else:
-                        if not title:
-                            title = _page_title(text)
-                        slides = _slides_from_html(text)
-                    if len(slides) > len(best):
-                        best = slides
-                    if len(best) >= 2:
-                        return title, best
-                except httpx.HTTPError as exc:
-                    logger.debug("Instagram page fetch failed %s: %s", page_url, exc)
-
-            # Primary URL already returned slides — don't hammer every fallback
-            if page_i == 0 and len(best) >= 1:
-                # One image might be a stub og:image; try one embed, then stop
+                    return _page_title(response.text), slides
+            except httpx.HTTPError:
                 continue
-            if page_i >= 1 and best:
-                return title, best
-
-    return title, best
+    return "", []
 
 
 def _slides_from_html(text: str) -> list[IgSlide]:
@@ -413,16 +433,12 @@ def _slides_from_html(text: str) -> list[IgSlide]:
 
     # Carousel via edge_sidecar_to_children
     for block in _extract_json_objects_after_key(text, "edge_sidecar_to_children"):
-        slides = _slides_from_sidecar_obj(block)
-        if slides:
-            return _dedupe_slides(slides)
+        return _slides_from_sidecar_obj(block)
 
     # Newer carousel_media arrays (balanced brackets)
     for arr in _extract_json_arrays_after_key(text, "carousel_media"):
         if isinstance(arr, list) and arr:
-            slides = _slides_from_carousel_media(arr)
-            if slides:
-                return _dedupe_slides(slides)
+            return _slides_from_carousel_media(arr)
 
     # GraphQL-ish nodes with display_url / image_versions2
     node_slides = _slides_from_display_video_pairs(text)
@@ -460,15 +476,13 @@ def _slides_from_media_object(obj: dict) -> list[IgSlide]:
 
     sidecar = obj.get("edge_sidecar_to_children")
     if isinstance(sidecar, dict):
-        slides = _slides_from_sidecar_obj(sidecar)
-        if slides:
-            return slides
+        return _slides_from_sidecar_obj(sidecar)
 
     carousel = obj.get("carousel_media")
     if isinstance(carousel, list) and carousel:
-        slides = _slides_from_carousel_media(carousel)
-        if slides:
-            return slides
+        return _slides_from_carousel_media(carousel)
+    if obj.get("media_type") == 8:
+        return []
 
     slide = _slide_from_node(obj)
     return [slide] if slide else []
@@ -486,7 +500,7 @@ def _slides_from_sidecar_obj(data: dict) -> list[IgSlide]:
         slide = _slide_from_node(node)
         if slide:
             slides.append(slide)
-    return slides
+    return slides if len(slides) == len(edges) else []
 
 
 def _slides_from_sidecar_json(raw: str) -> list[IgSlide]:
@@ -605,7 +619,7 @@ def _slides_from_carousel_media(arr: list) -> list[IgSlide]:
         display = item.get("display_url") or item.get("display_src")
         if display and not _skip_image(str(display)):
             slides.append(IgSlide(kind="image", url=_clean_url(str(display))))
-    return slides
+    return slides if len(slides) == len(arr) else []
 
 
 def _best_display_resource_url(resources: list) -> str | None:
@@ -725,7 +739,10 @@ def _prefer_uncropped_url(url: str) -> str:
 
 
 def _slide_from_node(node: dict) -> IgSlide | None:
-    is_video = bool(node.get("is_video") or node.get("__typename") == "GraphVideo")
+    is_video = (
+        node.get("media_type") == 2 or node.get("is_video") or
+        node.get("__typename") == "GraphVideo" or node.get("video_versions") or node.get("video_url")
+    )
     if is_video:
         vurl = node.get("video_url")
         if vurl:
@@ -752,74 +769,6 @@ def _slide_from_node(node: dict) -> IgSlide | None:
     if display and not _skip_image(str(display)):
         return IgSlide(kind="image", url=_clean_url(str(display)))
     return None
-
-
-def _file_looks_like_image(path: Path) -> bool:
-    try:
-        with path.open("rb") as fh:
-            head = fh.read(12)
-    except OSError:
-        return False
-    if head[:3] == b"\xff\xd8\xff":
-        return True
-    if head[:8] == b"\x89PNG\r\n\x1a\n":
-        return True
-    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
-        return True
-    return False
-
-
-def _ensure_telegram_photo(path: Path) -> Path | None:
-    """Convert WebP/AVIF to JPEG so Telegram media groups accept the file."""
-    try:
-        with path.open("rb") as fh:
-            head = fh.read(16)
-    except OSError:
-        return None
-
-    is_jpeg = head[:3] == b"\xff\xd8\xff"
-    is_png = head[:8] == b"\x89PNG\r\n\x1a\n"
-    if is_jpeg or is_png:
-        return path
-
-    is_webp = head[:4] == b"RIFF" and head[8:12] == b"WEBP"
-    is_avif = b"ftypavif" in head or b"ftypavis" in head
-    if not (is_webp or is_avif):
-        return path
-
-    import shutil
-    import subprocess
-
-    if not shutil.which("ffmpeg"):
-        logger.warning("ffmpeg missing — cannot convert %s for Telegram", path.name)
-        return path
-
-    out = path.with_suffix(".jpg")
-    try:
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(path),
-                "-frames:v",
-                "1",
-                "-q:v",
-                "2",
-                str(out),
-            ],
-            check=True,
-            capture_output=True,
-            timeout=60,
-        )
-        if out.is_file() and out.stat().st_size > 1000:
-            path.unlink(missing_ok=True)
-            logger.info("Converted %s → JPEG for Telegram album", path.name)
-            return out
-    except Exception as exc:
-        logger.warning("Could not convert %s to JPEG: %s", path.name, exc)
-        out.unlink(missing_ok=True)
-    return path
 
 
 def _file_looks_like_video(path: Path) -> bool:
@@ -849,11 +798,6 @@ def _dedupe_slides(slides: list[IgSlide]) -> list[IgSlide]:
     return out
 
 
-def _shortcode(url: str) -> str | None:
-    match = re.search(r"instagram\.com/(?:reel|p|tv)/([^/?#]+)", url, re.IGNORECASE)
-    return match.group(1) if match else None
-
-
 def _page_title(text: str) -> str:
     match = _OG_TITLE_RE.search(text)
     if match:
@@ -869,16 +813,11 @@ def _skip_image(url: str) -> bool:
     return any(h in lower for h in _SKIP_IMAGE_HINTS)
 
 
-def _uploader_from_instagram_url(url: str) -> str | None:
-    match = re.search(r"instagram\.com/@([^/?#]+)", url, re.IGNORECASE)
-    return match.group(1) if match else None
-
-
 def _clean_url(raw: str) -> str:
     url = html.unescape(raw).strip()
     url = url.replace("\\/", "/").replace("\\u0026", "&")
     url = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), url)
-    return unquote(url)
+    return url
 
 
 def _fix_json(raw: str) -> str:
@@ -886,29 +825,6 @@ def _fix_json(raw: str) -> str:
         raw.replace("\\/", "/")
         .replace("\\u0026", "&")
     )
-
-
-def _load_cookie_header() -> str | None:
-    # Passive lookup only — the anonymous scrape must never trigger an
-    # account login. Logging in is reserved for the login-wall fallback.
-    from bot.instagram_auth import existing_instagram_cookies
-
-    path = existing_instagram_cookies() or get_cookies_file()
-    if not path:
-        return None
-    try:
-        import http.cookiejar
-
-        mozilla = http.cookiejar.MozillaCookieJar(path)
-        mozilla.load(ignore_discard=True, ignore_expires=True)
-        parts = []
-        for c in mozilla:
-            if "instagram" in (c.domain or ""):
-                parts.append(f"{c.name}={c.value}")
-        return "; ".join(parts) if parts else None
-    except Exception as exc:
-        logger.debug("Could not load IG cookies: %s", exc)
-        return None
 
 
 def _cleanup_dir(directory: Path) -> None:
