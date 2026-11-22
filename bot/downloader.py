@@ -6,6 +6,7 @@ import copy
 import logging
 import re
 import shutil
+import subprocess
 import threading
 import tempfile
 import time
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import httpx
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
@@ -219,19 +221,17 @@ def resolve_media(
                 return result
         # X photos / videos via syndication CDN
         if is_x_url(url):
-            post = resolve_x_post(
-                url,
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
+            post = _resolve_cdn_provider(
+                resolve_x_post, url, "X", ("twimg.com",),
+                progress_callback, cancel_check,
             )
             if post:
                 return post
         # Pinterest pins (yt-dlp often misses still images)
         if is_pinterest_url(url):
-            pin = resolve_pinterest(
-                url,
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
+            pin = _resolve_cdn_provider(
+                resolve_pinterest, url, "Pinterest", ("pinimg.com",),
+                progress_callback, cancel_check,
             )
             if pin:
                 return pin
@@ -389,9 +389,9 @@ def resolve_media(
         )
 
         if instagram_url and not is_audio:
-            from bot.instagram import _validate_slide
+            from bot.cdn_media import validate_media_file
 
-            downloaded = _validate_slide(downloaded, "video")
+            downloaded = validate_media_file(downloaded, "video")
         downloaded = _maybe_compress(
             downloaded,
             is_audio=is_audio,
@@ -499,6 +499,52 @@ def resolve_media(
                 raise RuntimeError(instagram_login_hint()) from None
             raise RuntimeError("Instagram could not return playable media for this link.") from None
         raise exc
+
+
+def _resolve_cdn_provider(resolve, url, provider, domains, progress_callback, cancel_check):
+    from bot.cdn_media import download_slides
+
+    output_dir = DOWNLOAD_DIR / uuid.uuid4().hex[:12]
+    for attempt in (1, 2):
+        result = resolve(url, progress_callback=progress_callback, cancel_check=cancel_check)
+        if not result:
+            return None
+        slides = result.album or [
+            AlbumItem(kind="image" if result.is_image else "video", url=result.direct_url),
+        ]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        finished = False
+        try:
+            local = download_slides(
+                slides, output_dir, progress_callback, cancel_check,
+                provider=provider, domains=domains, referer=url,
+            )
+            if result.album:
+                result.album = local
+            else:
+                result.file_path = local[0].path
+                result.direct_url = None
+            result.file_size = sum(item.file_size for item in local)
+            result.used_direct = False
+            finished = True
+            return result
+        except (httpx.HTTPError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            if isinstance(exc, FileTooLargeError):
+                raise
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            logger.warning(
+                "platform=%s stage=cdn_download error=%s http_status=%s attempt=%d",
+                provider, type(exc).__name__, status, attempt,
+            )
+            if status == 429:
+                raise RuntimeError(f"{provider} is rate-limiting requests. Try again later.") from None
+            if not (status in {401, 403, 404, 410, 500, 502, 503, 504}
+                    or isinstance(exc, httpx.TransportError)):
+                return None
+        finally:
+            if not finished:
+                _cleanup_job_dir(output_dir)
+    return None
 
 
 def download_from_info(

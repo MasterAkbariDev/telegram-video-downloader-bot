@@ -10,6 +10,7 @@ import httpx
 from PIL import Image
 
 from bot import downloader, instagram, media_cache, urls
+from bot.cdn_media import validate_media_file
 from bot.jobs import DownloadCancelledError
 
 
@@ -111,7 +112,7 @@ class InstagramMediaTest(unittest.TestCase):
             with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as temp:
                 path = Path(temp)
 
-                def fail(slides, directory, progress, cancel):
+                def fail(slides, directory, progress, cancel, **kwargs):
                     (directory / "partial.tmp").write_bytes(b"partial")
                     raise failure
 
@@ -133,6 +134,6 @@ class InstagramMediaTest(unittest.TestCase):
             path = Path(temp) / "not-media"
             path.write_bytes(b"<html>not media</html>")
             with self.assertRaises(OSError):
-                instagram._validate_slide(path, "image")
+                validate_media_file(path, "image")
             with self.assertRaisesRegex(RuntimeError, "invalid video"):
-                instagram._validate_slide(path, "video")
+                validate_media_file(path, "video")

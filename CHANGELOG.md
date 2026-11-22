@@ -12,6 +12,8 @@ All notable changes to this bot are documented here.
 - Refresh expired media URLs once, clean up incomplete downloads, and log Instagram
   failures without signed CDN links or session information.
 - Preserve mixed X media and retry Telegram flood-control rejections once.
+- Validate X and Pinterest files locally before sending, and select Pinterest videos
+  from the requested pin's metadata.
 - Start Telegram polling while GitHub and other maintenance checks run in the background.
 
 ## 1.13.1 — 2026-09-23

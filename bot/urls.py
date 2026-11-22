@@ -40,6 +40,17 @@ _SUPPORTED_HOSTS = (
     "beeg.team",
 )
 
+_PINTEREST_DOMAINS = tuple(
+    "pinterest." + suffix for suffix in (
+        "com", "fr", "de", "ch", "jp", "cl", "ca", "it", "co.uk", "nz", "ru",
+        "com.au", "at", "pt", "co.kr", "es", "com.mx", "dk", "ph", "th", "com.uy",
+        "co", "nl", "info", "kr", "ie", "vn", "com.vn", "ec", "mx", "in", "pe",
+        "co.at", "hu", "co.in", "co.nz", "id", "com.ec", "com.py", "tw", "be", "uk",
+        "com.bo", "com.pe",
+    )
+) + ("pin.it",)
+
+
 # Plain http(s) URLs for supported hosts only
 _PLAIN_URL_RE = re.compile(
     r"https?://(?:www\.)?"
@@ -50,7 +61,7 @@ _PLAIN_URL_RE = re.compile(
     r"spotify\.com|open\.spotify\.com|"
     r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|m\.tiktok\.com|"
     r"x\.com|twitter\.com|"
-    r"pinterest\.com|pinterest\.[a-z.]+|pin\.it|"
+    r"(?:[a-z0-9-]+\.)?pinterest\.[a-z.]+|pin\.it|"
     r"pornhub\.com|xvideos\.com|xhamster\.com|redtube\.com|xnxx\.com|"
     r"spankbang\.com|eporner\.com|youporn\.com|tube8\.com|"
     r"beeg\.com|beeg\.site|beeg\.team"
@@ -69,7 +80,7 @@ _BARE_URL_RE = re.compile(
     r"spotify\.com|open\.spotify\.com|"
     r"tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|"
     r"x\.com|twitter\.com|"
-    r"pinterest\.com|pin\.it|"
+    r"(?:[a-z0-9-]+\.)?pinterest\.[a-z.]+|pin\.it|"
     r"pornhub\.com|xvideos\.com|xhamster\.com|redtube\.com|xnxx\.com|"
     r"spankbang\.com|eporner\.com|youporn\.com|tube8\.com|"
     r"beeg\.com|beeg\.site|beeg\.team"
@@ -82,6 +93,10 @@ _BARE_URL_RE = re.compile(
 _ANY_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
 
+def is_pinterest_host(host: str) -> bool:
+    return any(host == domain or host.endswith("." + domain) for domain in _PINTEREST_DOMAINS)
+
+
 def is_supported_url(url: str) -> bool:
     """True if URL is a supported media platform."""
     if not url:
@@ -91,13 +106,7 @@ def is_supported_url(url: str) -> bool:
     except ValueError:
         return False
     host = host.lower().removeprefix("www.")
-    if host == "pin.it" or host.endswith(".pin.it"):
-        return True
-    if (
-        host == "pinterest.com"
-        or host.endswith(".pinterest.com")
-        or host.startswith("pinterest.")
-    ):
+    if is_pinterest_host(host):
         return True
     return any(host == h or host.endswith("." + h) for h in _SUPPORTED_HOSTS)
 

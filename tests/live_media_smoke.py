@@ -30,6 +30,7 @@ CASES = {
     ),
     "x-video": ("https://x.com/NASA/status/2094798955074781450", ("video",)),
     "x-image": ("https://x.com/NASA/status/2117633046002225363", ("image",)),
+    "x-album": ("https://twitter.com/NASA/status/2105698284354367897", ("image",) * 4),
     "pinterest-image": ("https://co.pinterest.com/pin/824721750502199491/", ("image",)),
     "pinterest-video": ("https://www.pinterest.com/pin/1084663891475263837/", ("video",)),
 }

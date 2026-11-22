@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html as html_lib
+import json
 import logging
 import re
 from typing import Callable
@@ -11,7 +12,9 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from bot.config import YTDLP_PROXY
+from bot.cdn_media import is_media_cdn
 from bot.fast_download import DESKTOP_UA
+from bot.urls import is_pinterest_host
 
 try:
     from bot.jobs import CancelCheck
@@ -36,6 +39,10 @@ _ORIGINAL_IMG_RE = re.compile(
     r"https://i\.pinimg\.com/originals/[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]+\.(?:jpg|jpeg|png|webp)",
     re.IGNORECASE,
 )
+_VIDEO_SNIPPET_RE = re.compile(
+    r"""<script\b[^>]*\bdata-test-id=["']video-snippet["'][^>]*>(.*?)</script>""",
+    re.IGNORECASE | re.DOTALL,
+)
 # Paths vary: /videos/720p/…, /videos/mc/h264/…, /videos/iht/expMp4/…_720w.mp4
 _VIDEO_RE = re.compile(
     r"https://v\d*\.pinimg\.com/videos/(?:[^\"'\\]+/)*?"
@@ -54,11 +61,7 @@ def is_pinterest_url(url: str) -> bool:
         host = (urlparse(url).hostname or "").lower().removeprefix("www.")
     except ValueError:
         return False
-    if host == "pin.it" or host.endswith(".pin.it"):
-        return True
-    return host == "pinterest.com" or host.endswith(".pinterest.com") or host.startswith(
-        "pinterest."
-    )
+    return is_pinterest_host(host)
 
 
 def resolve_pinterest(
@@ -67,7 +70,7 @@ def resolve_pinterest(
     progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
 ):
-    """Resolve a Pinterest pin — Telegram fetches pinimg CDN URLs directly."""
+    """Return the public CDN media for the requested pin."""
     from bot.downloader import MediaResult
 
     if cancel_check:
@@ -85,7 +88,6 @@ def resolve_pinterest(
 
     display = title or "Pinterest pin"
 
-    # Videos: pinimg CDN works with Telegram send_video (verified)
     if video_url:
         if progress_callback:
             progress_callback("📤 <b>Sending Pinterest video…</b>")
@@ -138,8 +140,8 @@ def scrape_pinterest_pin(url: str) -> tuple[str | None, str | None, str | None]:
         # Drop trailing Pinterest site suffix
         title = re.sub(r"\s*[|\-–]\s*Pinterest\s*$", "", title, flags=re.I).strip()
 
-    video_url = _best_video(text)
-    image_url = _best_image(text)
+    is_video, video_url = _pin_video(text)
+    image_url = None if is_video else _best_image(text)
 
     if not image_url and not video_url:
         logger.info(
@@ -180,6 +182,27 @@ def _best_image(text: str) -> str | None:
 def _normalize_html(text: str) -> str:
     # JSON embeds escape slashes as \/ or \u002F
     return text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u002f", "/")
+
+
+def _pin_video(text: str) -> tuple[bool, str | None]:
+    # Related pins can have videos even on an image-only page. Only use the
+    # dedicated video metadata for the requested pin as evidence of its kind.
+    match = _VIDEO_SNIPPET_RE.search(text)
+    if not match:
+        return False, None
+    try:
+        video = json.loads(html_lib.unescape(match[1]))
+    except (ValueError, TypeError):
+        return True, None
+    if not isinstance(video, dict):
+        return True, None
+    url = video.get("contentUrl")
+    if isinstance(url, str) and is_media_cdn(url, ("pinimg.com",)):
+        if urlparse(url).path.lower().endswith(".mp4"):
+            return True, url
+    # Some video snippets describe an HLS stream while the same pin's
+    # rendered page supplies a progressive MP4 as well.
+    return True, _best_video(text)
 
 
 def _best_video(text: str) -> str | None:

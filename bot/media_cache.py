@@ -56,13 +56,13 @@ def cache_key(url: str) -> str:
         return f"tt:{m.group(1)}"
     m = re.search(r"(?:twitter\.com|x\.com)/(?:[^/]+/)?status(?:es)?/(\d+)", lower)
     if m:
-        return f"x:{m.group(1)}"
+        return f"x2:{m.group(1)}"
     m = re.search(r"pinterest\.[^/]+/pin/(\d+)", lower)
     if m:
-        return f"pin:{m.group(1)}"
+        return f"pin2:{m.group(1)}"
     m = re.search(r"(?:^|//)(?:www\.)?pin\.it/([A-Za-z0-9]+)", url)
     if m:
-        return f"pinit:{m.group(1)}"
+        return f"pinit2:{m.group(1)}"
     return "u:" + hashlib.sha256(url.strip().encode()).hexdigest()[:24]
 
 

@@ -166,10 +166,12 @@ def _slides_from_tweet(data: dict) -> list[XSlide]:
     for item in ordered or []:
         if not isinstance(item, dict):
             continue
-        kind = item.get("type", "").lower()
-        url = item.get("url") or item.get("media_url_https")
-        if kind in {"photo", "image"} and url:
-            slides.append(XSlide("image", _orig_photo_url(url)))
+        kind = (item.get("type") or "").lower()
+        if kind in {"photo", "image"}:
+            # In X's mediaDetails, "url" is often the t.co post permalink.
+            url = item.get("media_url_https") or item.get("media_url") or item.get("url")
+            if url and urlparse(url).hostname == "pbs.twimg.com":
+                slides.append(XSlide("image", _orig_photo_url(url)))
         elif kind in {"video", "animated_gif", "gif"}:
             video = item.get("video_info") or item
             url = _best_mp4_from_variants(video.get("variants") or []) or item.get("url")
