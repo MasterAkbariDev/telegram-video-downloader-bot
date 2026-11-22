@@ -9,7 +9,7 @@ from pathlib import Path
 
 import httpx
 from PIL import Image
-from telegram import Bot
+from telegram.ext import Defaults, ExtBot
 from telegram.request import HTTPXRequest
 from yt_dlp.plugins import load_all_plugins
 
@@ -153,7 +153,9 @@ async def _main():
         parser.error("Delivery requires the configured bot token.")
     request = HTTPXRequest(proxy=config.TELEGRAM_PROXY, connect_timeout=15, read_timeout=30, write_timeout=90)
     try:
-        async with Bot(config.BOT_TOKEN, request=request) as bot:
+        async with ExtBot(
+            config.BOT_TOKEN, request=request, defaults=Defaults(disable_notification=True),
+        ) as bot:
             return await _run(cases, bot, chat_id)
     except Exception as exc:
         print(f"FAIL telegram_connect {type(exc).__name__}", flush=True)

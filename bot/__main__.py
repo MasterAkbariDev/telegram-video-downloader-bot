@@ -40,7 +40,7 @@ from bot.handlers import (
 from bot import stats
 from bot.follow_requests import follow_request_poll_loop
 from bot.updater import notify_pending_update
-from bot.update_check import notify_admins_if_update_available, update_check_loop
+from bot.update_check import update_check_loop
 from bot.version import format_version_label
 from bot import media_cache
 from bot.ytdlp_updater import ytdlp_update_loop
@@ -50,16 +50,20 @@ logger = logging.getLogger(__name__)
 
 async def _post_init(application) -> None:
     media_cache.init_db()
-    await notify_pending_update(application)
-    # One-time alert per new GitHub version (admins only)
-    await notify_admins_if_update_available(application)
-    # Keep checking in the background; still only alerts once per version
-    asyncio.create_task(update_check_loop(application))
-    # Notify requesters once a follow request they made is accepted/declined
-    asyncio.create_task(follow_request_poll_loop(application))
-    # Keep yt-dlp current — it's still the primary/best-maintained extractor
-    # for YouTube specifically, so a stale copy there costs the most
-    asyncio.create_task(ytdlp_update_loop(application))
+    # A slow GitHub or admin notification request must not delay polling.
+    application.bot_data["maintenance_tasks"] = (
+        asyncio.create_task(notify_pending_update(application)),
+        asyncio.create_task(update_check_loop(application)),
+        asyncio.create_task(follow_request_poll_loop(application)),
+        asyncio.create_task(ytdlp_update_loop(application)),
+    )
+
+
+async def _post_stop(application) -> None:
+    tasks = application.bot_data.pop("maintenance_tasks", ())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _build_application() -> Application:
@@ -81,7 +85,7 @@ def _build_application() -> Application:
         logger.info("Using proxy: %s", TELEGRAM_PROXY.split("@")[-1])
         builder = builder.proxy_url(TELEGRAM_PROXY)
 
-    builder = builder.post_init(_post_init)
+    builder = builder.post_init(_post_init).post_stop(_post_stop).post_shutdown(_post_stop)
     return builder.build()
 
 

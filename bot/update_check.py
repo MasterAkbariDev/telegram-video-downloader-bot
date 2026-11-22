@@ -319,12 +319,11 @@ async def notify_admins_if_update_available(app: Application) -> None:
 
 async def update_check_loop(app: Application, interval_sec: int = UPDATE_CHECK_INTERVAL_SEC) -> None:
     """Background loop: check periodically; alert once per new version."""
-    # Startup already checks once; wait an interval before the next pass.
     while True:
         try:
-            await asyncio.sleep(interval_sec)
             await notify_admins_if_update_available(app)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Periodic update check failed")
+        await asyncio.sleep(interval_sec)

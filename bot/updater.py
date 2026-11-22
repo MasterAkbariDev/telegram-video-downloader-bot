@@ -21,13 +21,11 @@ logger = logging.getLogger(__name__)
 UPDATE_SCRIPT = ROOT_DIR / "update.sh"
 PENDING_UPDATE_FILE = DATA_DIR / "pending_update.json"
 
+_RESTART_SIGNALS = [signal.SIGTERM]
+if hasattr(signal, "SIGKILL"):
+    _RESTART_SIGNALS.append(signal.SIGKILL)
 _RESTART_EXIT_CODES = frozenset(
-    {
-        -signal.SIGTERM,
-        -signal.SIGKILL,
-        128 + signal.SIGTERM,
-        128 + signal.SIGKILL,
-    }
+    code for signum in _RESTART_SIGNALS for code in (-signum, 128 + signum)
 )
 
 _STATUS_ICONS = {
